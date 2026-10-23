@@ -1,4 +1,4 @@
--- DaHood AimLock + ESP + MultiLock + PlayerList
+-- DaHood AimLock + ESP + MultiLock + PlayerList + FastReload
 -- Target: Da Hood (Roblox)
 
 local Players = game:GetService("Players")
@@ -13,7 +13,10 @@ local LocalPlayer = Players.LocalPlayer
 local Config = {
     -- Aim
     AimEnabled = false,
+    AimUseKey = true,                -- лок по зажатию клавиши
     AimKey = Enum.KeyCode.E,
+    AimUseMouse = true,              -- лок по зажатию ПКМ
+    AimMouseButton = Enum.UserInputType.MouseButton2,
     AimPart = "Head",
     AimFOV = 120,
     AimSmooth = 0.35,
@@ -30,6 +33,8 @@ local Config = {
     RapidFireDelay = 0.05,
     AutoReload = false,
     ReloadDelay = 0.3,
+    FastReload = false,
+    FastReloadDelay = 0.05,          -- пауза между deactivate/activate
 
     -- Speed
     SpeedEnabled = false,
@@ -59,9 +64,11 @@ local Config = {
 -- STATE
 ------------------------------------------------------------
 local HoldingAim = false
+local HoldingAimMouse = false
 local HoldingMultiLock = false
 local LastFire = 0
 local LastReload = 0
+local LastFastReload = 0
 local FOVCircle = nil
 local MainGui = nil
 local MainFrame = nil
@@ -147,6 +154,11 @@ end
 ------------------------------------------------------------
 -- AIM
 ------------------------------------------------------------
+local function aimHeld()
+    return (Config.AimUseKey and HoldingAim)
+        or (Config.AimUseMouse and HoldingAimMouse)
+end
+
 local function getClosestTarget()
     if Config.MultiLockEnabled and HoldingMultiLock and #Config.TargetList > 0 then
         local t, p = getClosestFromTargetList()
@@ -175,7 +187,8 @@ end
 
 local function aimStep()
     if not Config.AimEnabled then return end
-    local wantsLock = HoldingAim
+    -- лок только пока зажата кнопка/ПКМ (или активен manual/multi-lock)
+    local wantsLock = aimHeld()
         or Config.TargetLocked ~= nil
         or (Config.MultiLockEnabled and HoldingMultiLock and #Config.TargetList > 0)
     if not wantsLock then return end
@@ -195,22 +208,8 @@ end
 ------------------------------------------------------------
 -- ESP (text only)
 ------------------------------------------------------------
-local ESPDrawings = {}  -- [plr] = {name=, hp=, dist=}
+local ESPdrawings = {}
 
-local function ensureESP(plr)
-    if ESPDrawings[plr] or not Drawing then return end
-    ESPDrawings[plr] = {
-        name = Drawing.new("Text"),
-        hp   = Drawing.new("Text"),
-        dist = Drawing.new("Text"),
-    }
-    for _, d in pairs(ESP.drawings or ESPDrawings[plr]) do end
-    for _, d in pairs(ESPdrawings[plr]) do end -- no-op safeguard
-    for _, d in pairs(ESPdrawings[plr]) do end -- no-op safeguard
-end
--- (ensureESP rewritten below, keeping simple)
-
-ESPdrawings = {}
 local function ensureESP(plr)
     if ESPdrawings[plr] or not Drawing then return end
     local name = Drawing.new("Text")
@@ -274,7 +273,7 @@ local function updateESP()
         local baseX, baseY = sp.X, sp.Y
         local offset = 0
         if Config.ESPShowName then
-            s.name.Text = plr.Name
+            s.name.Text = plr.DisplayName
             s.name.Color = color
             s.name.Position = Vector2.new(baseX, baseY + offset)
             s.name.Visible = true
@@ -303,7 +302,7 @@ local function updateESP()
 end
 
 ------------------------------------------------------------
--- RAPID FIRE / AUTO RELOAD
+-- RAPID FIRE / AUTO RELOAD / FAST RELOAD
 ------------------------------------------------------------
 local function rapidFireStep()
     if not Config.RapidFire then return end
@@ -334,6 +333,33 @@ local function autoReloadStep()
             end)
         end
     end
+end
+
+-- Fast reload: deactivate/activate цикл без ожидания анимации
+-- Работает на большинстве пушек Da Hood через Tool:Deactivate -> Tool:Activate
+local function fastReloadStep()
+    if not Config.FastReload then return end
+    local now = tick()
+    if now - LastFastReload < Config.FastReloadDelay then return end
+    LastFastReload = now
+
+    local char = getCharacter()
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+
+    -- быстрый reload: сначала RemoteEvent если есть
+    local rr = tool:FindFirstChild("Reload")
+    if rr and rr:IsA("RemoteEvent") then
+        pcall(function() rr:FireServer() end)
+        return
+    end
+
+    -- универсальный fallback: deactivate -> activate с минимальной паузой
+    pcall(function()
+        tool:Deactivate()
+        tool:Activate()
+    end)
 end
 
 ------------------------------------------------------------
@@ -560,7 +586,7 @@ local function buildMainMenu()
     scroll.BorderSizePixel = 0
     scroll.ScrollBarThickness = 4
     scroll.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 80)
-    scroll.CanvasSize = UDim2.new(0, 0, 0, 800)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 900)
     scroll.Parent = MainFrame
 
     local layout = Instance.new("UIListLayout")
@@ -570,6 +596,8 @@ local function buildMainMenu()
 
     mkSection(scroll, "— AIMLOCK —")
     mkToggle(scroll, "Aimlock Enabled", Config.AimEnabled, function(v) Config.AimEnabled = v end)
+    mkToggle(scroll, "Lock on Key (" .. string.upper(Config.AimKey.Name) .. ")", Config.AimUseKey, function(v) Config.AimUseKey = v end)
+    mkToggle(scroll, "Lock on RMB", Config.AimUseMouse, function(v) Config.AimUseMouse = v end)
     mkToggle(scroll, "Visible Check", Config.AimVisibleCheck, function(v) Config.AimVisibleCheck = v end)
     mkSlider(scroll, "FOV", 50, 400, Config.AimFOV, function(v) Config.AimFOV = v end)
     mkSlider(scroll, "Smooth x10", 1, 10, math.floor(Config.AimSmooth * 10), function(v)
@@ -591,9 +619,7 @@ local function buildMainMenu()
     end)
     mkButton(scroll, "Clear Targets", function()
         Config.TargetList = {}
-        if ListFrame then
-            for _, row in pairs(RowByPlayer) do row.TextColor3 = Color3.fromRGB(180, 180, 190) end
-        end
+        for _, row in pairs(RowByPlayer) do row.TextColor3 = Color3.fromRGB(180, 180, 190) end
     end)
 
     mkSection(scroll, "— ESP —")
@@ -609,6 +635,10 @@ local function buildMainMenu()
         Config.RapidFireDelay = v / 1000
     end)
     mkToggle(scroll, "Auto Reload", Config.AutoReload, function(v) Config.AutoReload = v end)
+    mkToggle(scroll, "Fast Reload", Config.FastReload, function(v) Config.FastReload = v end)
+    mkSlider(scroll, "Fast Reload Delay (ms)", 10, 200, math.floor(Config.FastReloadDelay * 1000), function(v)
+        Config.FastReloadDelay = v / 1000
+    end)
 
     mkSection(scroll, "— MOVEMENT —")
     mkToggle(scroll, "Speed Enabled", Config.SpeedEnabled, function(v) Config.SpeedEnabled = v end)
@@ -629,7 +659,7 @@ local function buildMainMenu()
 end
 
 ------------------------------------------------------------
--- PLAYER LIST
+-- PLAYER LIST (DisplayName)
 ------------------------------------------------------------
 local function buildPlayerList()
     if not MainGui then return end
@@ -705,7 +735,7 @@ local function buildPlayerList()
             btn.TextSize = 12
             btn.BorderSizePixel = 0
             btn.AutoButtonColor = false
-            btn.Text = "  " .. plr.Name
+            btn.Text = "  " .. plr.DisplayName
             btn.TextColor3 = isInTargetList(plr) and Color3.fromRGB(120, 220, 160) or Color3.fromRGB(180, 180, 190)
             btn.Parent = ListScroll
             mkCorner(btn, 4)
@@ -737,7 +767,8 @@ end
 ------------------------------------------------------------
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
-    if input.KeyCode == Config.AimKey then HoldingAim = true end
+    if Config.AimUseKey and input.KeyCode == Config.AimKey then HoldingAim = true end
+    if Config.AimUseMouse and input.UserInputType == Config.AimMouseButton then HoldingAimMouse = true end
     if input.KeyCode == Config.MultiLockKey then HoldingMultiLock = true end
     if input.KeyCode == Config.InstantStopKey and Config.InstantStopEnabled then instantStop() end
     if input.KeyCode == Config.MenuKey then
@@ -750,6 +781,7 @@ end)
 
 UserInputService.InputEnded:Connect(function(input)
     if input.KeyCode == Config.AimKey then HoldingAim = false end
+    if input.UserInputType == Config.AimMouseButton then HoldingAimMouse = false end
     if input.KeyCode == Config.MultiLockKey then HoldingMultiLock = false end
 end)
 
@@ -768,6 +800,7 @@ end)
 
 RunService.Heartbeat:Connect(rapidFireStep)
 RunService.Heartbeat:Connect(autoReloadStep)
+RunService.Heartbeat:Connect(fastReloadStep)
 RunService.Heartbeat:Connect(speedStep)
 
-print("[Shiv] loaded. RightShift = menu, Tab = player list, F = multi-lock hold, E = aim hold, Q = instant stop.")
+print("[Shiv] loaded. RightShift=menu, Tab=targets, E/RMB=aim hold, F=multi-lock, Q=stop.")
