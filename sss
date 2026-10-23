@@ -1,7 +1,7 @@
 -- crumb | dahood all-in-one
 -- Executor: Synapse/Delta/Fluxus (sUNC high for hookmetamethod)
 -- Game: Da Hood (2788229376) and copies
--- Contains: Rayfield menu, player list w/ target select, aimlock, ESP (highlight + billboard), fast-reload toggle (hook body pending)
+-- Contains: Rayfield menu, player list w/ target select, aimlock, ESP, fast reload (tool property + animation)
 
 -- ============================================================
 -- SERVICES
@@ -19,7 +19,7 @@ local Config = {
     aimlock = {
         enabled        = false,
         key            = Enum.KeyCode.E,
-        prediction     = 0.165,   -- seconds, adjust to ping
+        prediction     = 0.165,
         target         = nil,
     },
     esp = {
@@ -33,8 +33,6 @@ local Config = {
     },
     fastReload = {
         enabled        = false,
-        -- PLACEHOLDER: Da Hood reload is server-sided for most tools.
-        -- Drop working hook/offset here when available.
     },
 }
 
@@ -46,14 +44,49 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Window = Rayfield:CreateWindow({
     Name = "crumb | dahood",
     LoadingTitle = "crumb loading",
-    LoadingSubtitle = "player list / lock / esp",
+    LoadingSubtitle = "player list / lock / esp / reload",
     Theme = "Default",
     ToggleUIKeybind = "K",
     ConfigurationSaving = { Enabled = false },
 })
 
 -- ============================================================
--- ESP MODULE
+-- AIMLOCK
+-- ============================================================
+local function isTargetValid(plr)
+    if not plr or plr == LocalPlayer then return false end
+    local char = plr.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local effects = char:FindFirstChild("BodyEffects")
+    if effects then
+        local ko = effects:FindFirstChild("K.O")
+        if ko and ko.Value then return false end
+    end
+    if char:FindFirstChild("GRABBING_CONSTRAINT") then return false end
+    if not char:FindFirstChild("HumanoidRootPart") then return false end
+    return true
+end
+
+local function getTargetPart()
+    local t = Config.aimlock.target
+    if not isTargetValid(t) then return nil end
+    return t.Character.HumanoidRootPart
+end
+
+RunService:BindToRenderStep("crumb_aimlock", 0, function()
+    if not Config.aimlock.enabled then return end
+    if not UserInputService:IsKeyDown(Config.aimlock.key) then return end
+    local part = getTargetPart()
+    if not part then return end
+    local hit = part.CFrame + (part.Velocity * Config.aimlock.prediction)
+    Workspace.CurrentCamera.CFrame =
+        CFrame.lookAt(Workspace.CurrentCamera.CFrame.Position, hit.Position)
+end)
+
+-- ============================================================
+-- ESP
 -- ============================================================
 local espHighlights = {}
 local espBillboards = {}
@@ -75,9 +108,8 @@ local function buildESP(plr)
     local char = plr.Character
     if not char then return end
     local head = char:FindFirstChild("Head")
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
     local hum  = char:FindFirstChildOfClass("Humanoid")
-    if not head or not hrp or not hum or hum.Health <= 0 then return end
+    if not head or not hum or hum.Health <= 0 then return end
 
     local hl = Instance.new("Highlight")
     hl.Name               = "crumb_esp_hl"
@@ -128,10 +160,9 @@ RunService.RenderStepped:Connect(function()
     if not Config.esp.showNames and not Config.esp.showDistance then return end
     for plr, bb in pairs(espBillboards) do
         if bb and bb.Parent and plr.Character then
-            local head = plr.Character:FindFirstChild("Head")
             local hrp  = plr.Character:FindFirstChild("HumanoidRootPart")
             local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if head and hrp then
+            if hrp then
                 local label = bb:FindFirstChildOfClass("TextLabel")
                 if label then
                     local parts = {}
@@ -150,30 +181,85 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ============================================================
--- AIMLOCK MODULE
+-- FAST RELOAD (tool property + animation)
 -- ============================================================
-local function getTargetPart()
-    local t = Config.aimlock.target
-    if not t or not t.Character then return nil end
-    local char = t.Character
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
-    local hum  = char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum or hum.Health <= 0 then return nil end
-    if char:FindFirstChild("GRABBING_CONSTRAINT") then return nil end
-    local effects = char:FindFirstChild("BodyEffects")
-    if effects and effects:FindFirstChild("K.O") and effects["K.O"].Value then return nil end
-    return hrp
+local fastReloadConnections = {}
+local reloadedTools = {}
+local animSpeed = 2
+
+local function tryPatchTool(tool)
+    if not Config.fastReload.enabled then return end
+    if not tool:IsA("Tool") then return end
+    if reloadedTools[tool] then return end
+    reloadedTools[tool] = true
+
+    -- 1) Property-based: ищем свойства похожие на время перезарядки
+    local props = {"ReloadTime", "Cooldown", "ReloadSpeed", "ReloadDuration", "Reload"}
+    for _, propName in ipairs(props) do
+        local ok, val = pcall(function() return tool[propName] end)
+        if ok and type(val) == "number" and val > 0 then
+            pcall(function()
+                tool[propName] = val / 2
+            end)
+        end
+    end
+
+    -- 2) Child values with matching names
+    for _, child in ipairs(tool:GetChildren()) do
+        if child:IsA("NumberValue") or child:IsA("IntValue") then
+            local n = child.Name:lower()
+            if n:find("reload") or n:find("cooldown") or n:find("duration") then
+                pcall(function()
+                    child.Value = child.Value / 2
+                end)
+            end
+        end
+    end
+
+    -- 3) Animation-based: ловим новые Animation внутри Tool
+    table.insert(fastReloadConnections, tool.ChildAdded:Connect(function(child)
+        if not Config.fastReload.enabled then return end
+        if not child:IsA("Animation") then return end
+        if not child.Name:lower():find("reload") then return end
+        task.spawn(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if not hum then return end
+            local animator = hum:FindFirstChildOfClass("Animator")
+            if not animator then return end
+            local track = animator:LoadAnimation(child)
+            track:Play()
+            task.wait(0.05)
+            track:AdjustSpeed(animSpeed)
+        end)
+    end))
 end
 
-RunService:BindToRenderStep("crumb_aimlock", 0, function()
-    if not Config.aimlock.enabled then return end
-    if not UserInputService:IsKeyDown(Config.aimlock.key) then return end
-    local part = getTargetPart()
-    if not part then return end
-    local hit = part.CFrame + (part.Velocity * Config.aimlock.prediction)
-    Workspace.CurrentCamera.CFrame =
-        CFrame.lookAt(Workspace.CurrentCamera.CFrame.Position, hit.Position)
-end)
+local function enableFastReload()
+    if #fastReloadConnections > 0 then return end
+    local function hookChar(char)
+        task.wait(0.3)
+        if not Config.fastReload.enabled then return end
+        -- ловим уже экипированные
+        for _, c in ipairs(char:GetChildren()) do
+            if c:IsA("Tool") then tryPatchTool(c) end
+        end
+        table.insert(fastReloadConnections, char.ChildAdded:Connect(function(child)
+            tryPatchTool(child)
+        end))
+    end
+    if LocalPlayer.Character then hookChar(LocalPlayer.Character) end
+    table.insert(fastReloadConnections, LocalPlayer.CharacterAdded:Connect(hookChar))
+end
+
+local function disableFastReload()
+    for _, conn in ipairs(fastReloadConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    fastReloadConnections = {}
+    reloadedTools = {}
+end
 
 -- ============================================================
 -- UI: PLAYERS TAB
@@ -283,24 +369,26 @@ MainTab:CreateSlider({
 MainTab:CreateSection("reload")
 
 MainTab:CreateToggle({
-    Name         = "Fast Reload (hook)",
+    Name         = "Fast Reload (x2)",
     CurrentValue = false,
     Flag         = "fastreload_toggle",
     Callback     = function(bool)
         Config.fastReload.enabled = bool
-        -- PLACEHOLDER: server-sided reload, hook body pending current build.
         if bool then
+            enableFastReload()
             Rayfield:Notify({
                 Title   = "fast reload",
-                Content = "toggle armed — hook body needs current offset",
+                Content = "x2 armed — equip a weapon",
                 Duration = 3,
             })
+        else
+            disableFastReload()
         end
     end,
 })
 
 -- ============================================================
--- CHARACTER LIFECYCLE (ESP rebuild on respawn)
+-- CHARACTER LIFECYCLE
 -- ============================================================
 local function hookCharacter(plr)
     plr.CharacterAdded:Connect(function()
