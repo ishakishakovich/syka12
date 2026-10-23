@@ -1,6 +1,6 @@
 --!nonstrict
 -- ============================================================
--- [Sh] Da Hood Lock v3
+-- [Sh] Da Hood Lock v4
 -- luau | roblox executor | game: Da Hood
 -- ============================================================
 
@@ -35,6 +35,12 @@ local Config = {
 
     TargetHUD    = true,
     FOVCircle    = true,
+
+    FlyEnabled   = false,
+    FlyKey       = Enum.KeyCode.V,
+    FlySpeed     = 60,
+    FastReload   = false,
+    FastStop     = false,
 }
 
 local C = {
@@ -62,7 +68,7 @@ local function stroke(o, c, t)
 end
 
 -- ============================================================
--- VALIDATION (needed by players tab before window builds)
+-- VALIDATION
 -- ============================================================
 local function valid(plr)
     if not plr or plr == LP then return false end
@@ -100,6 +106,64 @@ local function visible(plr)
 end
 
 -- ============================================================
+-- FLY
+-- ============================================================
+local flyConn = nil
+
+local function setFly(on)
+    Config.FlyEnabled = on
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+
+    if on then
+        if not root then return end
+        if flyConn then return end
+        local bv = Instance.new("BodyVelocity")
+        bv.Name = "ShFlyBV"
+        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+        local bg = Instance.new("BodyGyro")
+        bg.Name = "ShFlyBG"
+        bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+        bg.P = 9000
+        bg.D = 500
+        bg.Parent = root
+        flyConn = RunSvc.RenderStepped:Connect(function()
+            local c = LP.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            if not r then return end
+            local cam = Camera
+            local move = Vector3.zero
+            if UIS:IsKeyDown(Enum.KeyCode.W) then move = move + cam.CFrame.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then move = move - cam.CFrame.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then move = move - cam.CFrame.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then move = move + cam.CFrame.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then move = move - Vector3.new(0, 1, 0) end
+            if move.Magnitude > 0 then move = move.Unit * Config.FlySpeed end
+            bv.Velocity = move
+            bg.CFrame = CFrame.new(r.Position, r.Position + cam.CFrame.LookVector)
+        end)
+    else
+        if flyConn then flyConn:Disconnect(); flyConn = nil end
+        if root then
+            local bv = root:FindFirstChild("ShFlyBV"); if bv then bv:Destroy() end
+            local bg = root:FindFirstChild("ShFlyBG"); if bg then bg:Destroy() end
+        end
+    end
+end
+
+-- respawn handling
+LP.CharacterAdded:Connect(function()
+    if Config.FlyEnabled then
+        if flyConn then flyConn:Disconnect(); flyConn = nil end
+        task.wait(0.5)
+        setFly(true)
+    end
+end)
+
+-- ============================================================
 -- WINDOW
 -- ============================================================
 local Gui = Instance.new("ScreenGui")
@@ -126,7 +190,7 @@ local titleDot = mk("Frame", { Size = UDim2.fromOffset(8, 8), Position = UDim2.n
 corner(titleDot, 4)
 mk("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 28, 0, 0),
-    BackgroundTransparency = 1, Text = "sh lock  ·  da hood  v3",
+    BackgroundTransparency = 1, Text = "sh lock  ·  da hood  v4",
     Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
 }, Head)
 
@@ -194,7 +258,8 @@ end
 local AimPage     = makeTab("aim", 0)
 local VisualPage  = makeTab("visual", 84)
 local PlayersPage = makeTab("players", 168)
-local SetPage     = makeTab("settings", 252)
+local MiscPage    = makeTab("misc", 252)
+local SetPage     = makeTab("settings", 336)
 Tabs["aim"].btn.TextColor3 = C.text
 Tabs["aim"].btn.BackgroundColor3 = C.accentD
 Tabs["aim"].page.Visible = true
@@ -284,7 +349,7 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(AimPage, y, "lock enabled  [" .. Config.LockKey.Name .. "]", false, function(v) Config.LockEnabled = v end)
+    y = y + makeToggle(AimPage, y, "lock enabled", false, function(v) Config.LockEnabled = v end)
     y = y + makeToggle(AimPage, y, "auto lock (ближайший к прицелу)", true, function(v) Config.AutoLock = v end)
     y = y + makeToggle(AimPage, y, "visible check", true, function(v) Config.VisibleCheck = v end)
     y = y + makeToggle(AimPage, y, "team check", false, function(v) Config.TeamCheck = v end)
@@ -345,7 +410,7 @@ end
 -- PLAYERS TAB
 -- ============================================================
 do
-    local hint = mk("TextLabel", {
+    mk("TextLabel", {
         Size = UDim2.new(1, 0, 0, 24), Position = UDim2.new(0, 4, 0, 0),
         BackgroundTransparency = 1, Text = "клик по нику — зафиксировать. повторный клик — снять.",
         TextSize = 11, Font = Enum.Font.Gotham, TextColor3 = C.sub,
@@ -417,13 +482,24 @@ do
 end
 
 -- ============================================================
+-- MISC TAB
+-- ============================================================
+do
+    local y = 0
+    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]", false, function(v) setFly(v) end)
+    y = y + makeSlider(MiscPage, y, "fly speed", 10, 200, Config.FlySpeed, function(v) Config.FlySpeed = v end)
+    y = y + makeToggle(MiscPage, y, "fast reload  [R]", false, function(v) Config.FastReload = v end)
+    y = y + makeToggle(MiscPage, y, "fast stop", false, function(v) Config.FastStop = v end)
+    MiscPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
+end
+
+-- ============================================================
 -- SETTINGS TAB
 -- ============================================================
 do
     local y = 0
     y = y + makeToggle(SetPage, y, "hold to lock (off = toggle)", true, function(v) Config.LockHold = v end)
 
-    -- keybind picker
     local capturing = false
     local keyRow = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 40), Position = UDim2.new(0, 0, 0, y),
@@ -472,12 +548,15 @@ do
         TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = C.text, AutoButtonColor = false,
     }, SetPage)
     corner(unloadBtn, 6)
-    unloadBtn.MouseButton1Click:Connect(function() Gui:Destroy() end)
+    unloadBtn.MouseButton1Click:Connect(function()
+        if Config.FlyEnabled then setFly(false) end
+        Gui:Destroy()
+    end)
     SetPage.CanvasSize = UDim2.new(0, 0, 0, y + 40)
 end
 
 -- ============================================================
--- TARGET HUD (overlay)
+-- TARGET HUD
 -- ============================================================
 local HudFrame = mk("Frame", {
     Size = UDim2.fromOffset(260, 62),
@@ -532,20 +611,38 @@ local function pickTarget()
 end
 
 -- ============================================================
--- INPUT + AIM LOOP
+-- INPUT HANDLERS
 -- ============================================================
 local aiming = false
+
 UIS.InputBegan:Connect(function(i, gp)
     if gp then return end
     if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled end
     if i.KeyCode == Config.LockKey then
         if Config.LockHold then aiming = true else aiming = not aiming end
     end
+    if i.KeyCode == Config.FlyKey then
+        setFly(not Config.FlyEnabled)
+    end
+    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then
+        local char = LP.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local bp = LP:FindFirstChildOfClass("Backpack")
+        if tool and bp and char then
+            tool.Parent = bp
+            task.wait(0.02)
+            tool.Parent = char
+        end
+    end
 end)
+
 UIS.InputEnded:Connect(function(i)
     if i.KeyCode == Config.LockKey and Config.LockHold then aiming = false end
 end)
 
+-- ============================================================
+-- AIM LOOP
+-- ============================================================
 RunSvc.RenderStepped:Connect(function(dt)
     if not (aiming and Config.LockEnabled) then return end
     local target = pickTarget()
@@ -570,6 +667,26 @@ RunSvc.RenderStepped:Connect(function(dt)
     else
         local alpha = math.clamp(Config.Smoothness * dt, 0, 1)
         Camera.CFrame = cf:Lerp(goal, alpha)
+    end
+end)
+
+-- ============================================================
+-- FAST STOP LOOP
+-- ============================================================
+RunSvc.RenderStepped:Connect(function()
+    if not Config.FastStop or Config.FlyEnabled then return end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+    if hum.FloorMaterial == Enum.Material.Air then return end
+    local moving = UIS:IsKeyDown(Enum.KeyCode.W)
+        or UIS:IsKeyDown(Enum.KeyCode.A)
+        or UIS:IsKeyDown(Enum.KeyCode.S)
+        or UIS:IsKeyDown(Enum.KeyCode.D)
+    if not moving then
+        local v = hrp.AssemblyLinearVelocity
+        hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
     end
 end)
 
@@ -689,7 +806,7 @@ end)
 RunSvc.Heartbeat:Connect(function() pcall(updateESP) end)
 
 -- ============================================================
--- HUD UPDATE LOOP
+-- HUD LOOP
 -- ============================================================
 task.spawn(function()
     while Gui.Parent do
@@ -709,4 +826,4 @@ task.spawn(function()
     end
 end)
 
-print("[Sh] v3 loaded. lock = " .. Config.LockKey.Name .. "  ·  menu = " .. Config.MenuKey.Name)
+print("[Sh] v4 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  reload = R  ·  menu = " .. Config.MenuKey.Name)
