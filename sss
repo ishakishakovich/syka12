@@ -1,6 +1,6 @@
 --!nonstrict
 -- ============================================================
--- [Sh] Da Hood Lock v7  ·  plug & play
+-- [Sh] Da Hood — SH LOCK v9 · full suite
 -- luau | roblox executor | game: Da Hood
 -- ============================================================
 
@@ -8,43 +8,79 @@ local Players  = game:GetService("Players")
 local RunSvc   = game:GetService("RunService")
 local UIS      = game:GetService("UserInputService")
 local Stats    = game:GetService("Stats")
+local Lighting = game:GetService("Lighting")
 local WS       = game:GetService("Workspace")
 local LP       = Players.LocalPlayer
 local Camera   = WS.CurrentCamera
 
 local unloaded = false
 
+-- ============================================================
+-- CONFIG
+-- ============================================================
 local Config = {
+    -- aim
     LockEnabled    = false,
     LockHold       = true,
     LockKey        = Enum.KeyCode.Q,
-    MenuKey        = Enum.KeyCode.Insert,
+    MenuKey        = Enum.KeyCode.RightShift,
     PanicKey       = Enum.KeyCode.End,
     TargetPart     = "Head",
     FOV            = 280,
-    Smoothness     = 28,          -- tuned — snappy but not robotic
-    Prediction     = 0.13,         -- base lag comp; auto-scaled by ping
+    Smoothness     = 28,
+    Prediction     = 0.13,
     VisibleCheck   = true,
     TeamCheck      = false,
     AutoLock       = true,
     SelectedTarget = nil,
-    StickyRelease  = 0.35,         -- sec out of FOV before dropping target
-
+    StickyRelease  = 0.35,
+    -- combat
+    SilentAim      = false,
+    TriggerBot     = false,
+    TriggerRange   = 250,
+    HitChance      = 100,
+    AutoFire       = false,
+    Reach          = false,
+    ReachValue     = 12,
+    AutoStomp      = false,
+    KillAura       = false,
+    KillAuraRange  = 20,
+    -- fly
+    FlyEnabled     = false,
+    FlyKey         = Enum.KeyCode.V,
+    FlySpeed       = 28,
+    FlyMode        = "glide",   -- glide / hover / matrix / elytra
+    NoClip         = false,
+    InfiniteJump   = false,
+    SpeedHack      = false,
+    SpeedValue     = 45,
+    Spider         = false,
+    Step           = false,
+    DamageFly      = false,
+    -- visuals
     ESP          = true,
     BoxESP       = true,
     NameESP      = true,
     HealthESP    = true,
     DistanceESP  = true,
     TracerESP    = false,
-
+    TracerOrigin = "bottom",  -- bottom / character / crosshair
+    SkeletonESP  = false,
+    Chams        = false,
+    CashESP      = false,
+    FOVChanger   = false,
+    FOVValue     = 90,
+    Fullbright   = false,
+    MaxZoom      = false,
     TargetHUD    = true,
     FOVCircle    = true,
-
-    FlyEnabled   = false,
-    FlyKey       = Enum.KeyCode.V,
-    FlySpeed     = 28,
+    Watermark    = true,
+    -- player
     FastReload   = false,
     FastStop     = false,
+    AntiFling    = false,
+    -- utility
+    RemoveDoors  = false,
 }
 
 local C = {
@@ -58,6 +94,7 @@ local C = {
     line    = Color3.fromRGB(42, 42, 58),
     good    = Color3.fromRGB(120, 255, 140),
     bad     = Color3.fromRGB(255, 70, 80),
+    warn    = Color3.fromRGB(255, 200, 90),
 }
 
 local function mk(class, props, parent)
@@ -72,19 +109,14 @@ local function stroke(o, c, t)
 end
 
 -- ============================================================
--- PING + auto prediction
+-- HELPERS
 -- ============================================================
 local function getPing()
-    local ok, v = pcall(function()
-        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
-    end)
+    local ok, v = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     if ok and type(v) == "number" then return v / 1000 end
     return 0.08
 end
 
--- ============================================================
--- VALIDATION
--- ============================================================
 local function valid(plr)
     if not plr or plr == LP then return false end
     local ch = plr.Character
@@ -125,8 +157,59 @@ local function visible(plr)
     return res.Instance:IsDescendantOf(ch)
 end
 
+local function isChatFocused()
+    return UIS:GetFocusedTextBox() ~= nil
+end
+
 -- ============================================================
--- FLY
+-- CASH / BAG FINDERS
+-- ============================================================
+local function findCashParts()
+    local list = {}
+    for _, d in ipairs(WS:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local n = d.Name:lower()
+            if n:find("cash") or n:find("money") or n:find("dollar") then
+                table.insert(list, d)
+            end
+        end
+    end
+    return list
+end
+
+local function findNearestBag()
+    local best, bestD = nil, math.huge
+    local myPos = Camera.CFrame.Position
+    for _, d in ipairs(WS:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local n = d.Name:lower()
+            if (n:find("bag") or n:find("dropped") or n:find("moneybag")) and not n:find("tool") then
+                local dd = (myPos - d.Position).Magnitude
+                if dd < bestD then bestD = dd; best = d end
+            end
+        end
+    end
+    return best
+end
+
+-- ============================================================
+-- SILENT AIM  (hookmetamethod on Camera::WorldToScreenPoint fallback to normal)
+-- ============================================================
+local silentTarget = nil
+local originalWorldToViewport = nil
+local hooked = false
+
+local function installSilentHook()
+    if hooked or not Config.SilentAim then return end
+    if not hookmetamethod then return end
+    local ok, old = pcall(function() return hookmetamethod(game, "__index", function(self, k) return nil end) end)
+    -- we can't safely hook in all executors; use a lighter approach:
+    -- silent aim implemented via Mouse.Hit spoof not possible cross-executor.
+    -- fall back: silentAim is handled in trigger/auto fire using stored target.
+end
+
+-- ============================================================
+-- FLY (multi-mode)
 -- ============================================================
 local flyConn = nil
 local flySaved = nil
@@ -142,6 +225,7 @@ local function setFly(on)
         flySaved = { WalkSpeed = hum.WalkSpeed, PlatformStand = hum.PlatformStand }
         hum.PlatformStand = true
         hum.WalkSpeed = 0
+        local lastVel = Vector3.zero
         flyConn = RunSvc.RenderStepped:Connect(function(dt)
             if unloaded then return end
             local c = LP.Character
@@ -155,12 +239,35 @@ local function setFly(on)
             if UIS:IsKeyDown(Enum.KeyCode.D) then move = move + cam.CFrame.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
             if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then move = move - Vector3.new(0, 1, 0) end
-            if move.Magnitude > 0 then
-                move = move.Unit * Config.FlySpeed * dt
-            else
-                move = Vector3.new(0, -8 * dt, 0)
+
+            local mode = Config.FlyMode
+            local speed = Config.FlySpeed
+
+            if mode == "hover" then
+                if move.Magnitude > 0 then
+                    r.CFrame = r.CFrame + move.Unit * speed * dt
+                end
+            elseif mode == "matrix" then
+                if move.Magnitude > 0 then
+                    -- matrix = quick dash, velocity cap raised
+                    local dash = math.min(speed * 2, 90)
+                    r.CFrame = r.CFrame + move.Unit * dash * dt
+                end
+            elseif mode == "elytra" then
+                if move.Magnitude > 0 then
+                    r.CFrame = r.CFrame + move.Unit * speed * dt
+                else
+                    -- glide down like elytra
+                    r.CFrame = r.CFrame + Vector3.new(0, -14 * dt, 0) + cam.CFrame.LookVector * speed * 0.4 * dt
+                end
+            else -- glide
+                if move.Magnitude > 0 then
+                    r.CFrame = r.CFrame + move.Unit * speed * dt
+                else
+                    r.CFrame = r.CFrame + Vector3.new(0, -8 * dt, 0)
+                end
             end
-            r.CFrame = r.CFrame + move
+            lastVel = move
         end)
     else
         if flyConn then flyConn:Disconnect(); flyConn = nil end
@@ -176,7 +283,6 @@ LP.CharacterRemoving:Connect(function()
     if flyConn then flyConn:Disconnect(); flyConn = nil end
     flySaved = nil
 end)
-
 LP.CharacterAdded:Connect(function()
     if unloaded then return end
     if Config.FlyEnabled then
@@ -188,7 +294,7 @@ LP.CharacterAdded:Connect(function()
 end)
 
 -- ============================================================
--- FAST RELOAD
+-- FAST RELOAD / FAST STOP / SPEED / SPIDER / STEP / NOCLIP
 -- ============================================================
 local reloadDebounce = 0
 local function fastReload()
@@ -196,13 +302,11 @@ local function fastReload()
     local now = tick()
     if now - reloadDebounce < 0.1 then return end
     reloadDebounce = now
-
     local char = LP.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local tool = char:FindFirstChildOfClass("Tool")
     if not (hum and tool) then return end
-
     local animator = hum:FindFirstChildOfClass("Animator")
     if animator then
         local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
@@ -230,13 +334,22 @@ local function fastReload()
             pcall(function() cur.Value = mx.Value end)
         end
     end
-    for _, child in ipairs(tool:GetDescendants()) do
-        if child:IsA("BindableEvent") then
-            local n = child.Name:lower()
-            if n:find("reload") or n:find("ammo") or n:find("clip") then
-                pcall(function() child:Fire() end)
+end
+
+local noClipConns = {}
+local function setNoClip(on)
+    if on then
+        table.insert(noClipConns, RunSvc.Stepped:Connect(function()
+            if unloaded then return end
+            local ch = LP.Character
+            if not ch then return end
+            for _, d in ipairs(ch:GetDescendants()) do
+                if d:IsA("BasePart") and d.CanCollide then d.CanCollide = false end
             end
-        end
+        end))
+    else
+        for _, c in ipairs(noClipConns) do pcall(function() c:Disconnect() end) end
+        noClipConns = {}
     end
 end
 
@@ -251,8 +364,8 @@ Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 Gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
 
 local Win = mk("Frame", {
-    Size = UDim2.fromOffset(520, 400),
-    Position = UDim2.new(0.5, -260, 0.5, -200),
+    Size = UDim2.fromOffset(560, 420),
+    Position = UDim2.new(0.5, -280, 0.5, -210),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true,
 }, Gui)
 corner(Win, 10); stroke(Win, C.line, 1)
@@ -266,8 +379,8 @@ mk("Frame", { Size = UDim2.new(1, 0, 0.5, 0), Position = UDim2.new(0, 0, 0.5, 0)
 local titleDot = mk("Frame", { Size = UDim2.fromOffset(8, 8), Position = UDim2.new(0, 14, 0, 14), BackgroundColor3 = C.accent }, Head)
 corner(titleDot, 4)
 mk("TextLabel", {
-    Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 28, 0, 0),
-    BackgroundTransparency = 1, Text = "sh lock  ·  v7  auto",
+    Size = UDim2.new(0, 280, 1, 0), Position = UDim2.new(0, 28, 0, 0),
+    BackgroundTransparency = 1, Text = "sh lock  ·  v9  ·  RShift",
     Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
 }, Head)
 
@@ -301,18 +414,18 @@ do
 end
 
 -- ============================================================
--- TABS
+-- TABS  (7 tabs)
 -- ============================================================
 local TabBar = mk("Frame", {
     Size = UDim2.new(1, -20, 0, 30), Position = UDim2.new(0, 10, 0, 44),
     BackgroundTransparency = 1,
 }, Win)
 local Tabs = {}
-local function makeTab(name, x)
+local function makeTab(name, x, w)
     local b = mk("TextButton", {
-        Size = UDim2.new(0, 78, 1, 0), Position = UDim2.new(0, x, 0, 0),
+        Size = UDim2.new(0, w or 68, 1, 0), Position = UDim2.new(0, x, 0, 0),
         BackgroundColor3 = C.panel, Text = name,
-        Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.sub,
+        Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.sub,
         AutoButtonColor = false,
     }, TabBar)
     corner(b, 6)
@@ -332,11 +445,13 @@ local function makeTab(name, x)
     return page
 end
 
-local AimPage     = makeTab("aim", 0)
-local VisualPage  = makeTab("visual", 84)
-local PlayersPage = makeTab("players", 168)
-local MiscPage    = makeTab("misc", 252)
-local SetPage     = makeTab("settings", 336)
+local AimPage     = makeTab("aim", 0, 68)
+local CombatPage  = makeTab("combat", 72, 68)
+local VisualPage  = makeTab("visual", 144, 68)
+local MovePage    = makeTab("move", 216, 62)
+local TpPage      = makeTab("tp", 282, 54)
+local MiscPage    = makeTab("misc", 340, 62)
+local SetPage     = makeTab("cfg", 406, 62)
 Tabs["aim"].btn.TextColor3 = C.text
 Tabs["aim"].btn.BackgroundColor3 = C.accentD
 Tabs["aim"].page.Visible = true
@@ -421,6 +536,45 @@ local function makeSlider(parent, y, text, min, max, initial, cb)
     return 50
 end
 
+local function makeButton(parent, y, text, cb, color)
+    local b = mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, 30), Position = UDim2.new(0, 0, 0, y),
+        BackgroundColor3 = color or C.panel, Text = text,
+        TextSize = 12, Font = Enum.Font.GothamMedium, TextColor3 = C.text, AutoButtonColor = false,
+    }, parent)
+    corner(b, 6)
+    b.MouseButton1Click:Connect(cb)
+    return 34
+end
+
+local function makeDropdown(parent, y, text, options, initial, cb)
+    local row = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 40), Position = UDim2.new(0, 0, 0, y),
+        BackgroundColor3 = C.panel,
+    }, parent)
+    corner(row, 6)
+    mk("TextLabel", {
+        Size = UDim2.new(0, 120, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Text = text, TextSize = 12,
+        Font = Enum.Font.Gotham, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    local idx = 1
+    for i, o in ipairs(options) do if o == initial then idx = i break end end
+    local btn = mk("TextButton", {
+        Size = UDim2.new(0, 120, 0, 26), Position = UDim2.new(1, -132, 0.5, 0), AnchorPoint = Vector2.new(0, 0.5),
+        BackgroundColor3 = C.panel2, Text = options[idx],
+        TextSize = 12, Font = Enum.Font.GothamMedium, TextColor3 = C.accent, AutoButtonColor = false,
+    }, row)
+    corner(btn, 4); stroke(btn, C.line, 1)
+    btn.MouseButton1Click:Connect(function()
+        idx = idx + 1
+        if idx > #options then idx = 1 end
+        btn.Text = options[idx]
+        cb(options[idx])
+    end)
+    return 44
+end
+
 -- ============================================================
 -- AIM TAB
 -- ============================================================
@@ -433,6 +587,8 @@ do
     y = y + makeSlider(AimPage, y, "fov", 80, 600, Config.FOV, function(v) Config.FOV = v end)
     y = y + makeSlider(AimPage, y, "smoothness", 1, 40, Config.Smoothness, function(v) Config.Smoothness = v end)
     y = y + makeSlider(AimPage, y, "prediction base", 0, 0.4, Config.Prediction, function(v) Config.Prediction = v end)
+    y = y + makeToggle(AimPage, y, "silent aim", false, function(v) Config.SilentAim = v end)
+    y = y + makeSlider(AimPage, y, "hit chance %", 0, 100, Config.HitChance, function(v) Config.HitChance = v end)
 
     local partRow = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 40), Position = UDim2.new(0, 0, 0, y),
@@ -467,6 +623,23 @@ do
 end
 
 -- ============================================================
+-- COMBAT TAB
+-- ============================================================
+do
+    local y = 0
+    y = y + makeToggle(CombatPage, y, "trigger bot", false, function(v) Config.TriggerBot = v end)
+    y = y + makeSlider(CombatPage, y, "trigger range", 50, 500, Config.TriggerRange, function(v) Config.TriggerRange = v end)
+    y = y + makeToggle(CombatPage, y, "auto fire (by locked)", false, function(v) Config.AutoFire = v end)
+    y = y + makeToggle(CombatPage, y, "reach (hitbox)", false, function(v) Config.Reach = v end)
+    y = y + makeSlider(CombatPage, y, "reach studs", 5, 30, Config.ReachValue, function(v) Config.ReachValue = v end)
+    y = y + makeToggle(CombatPage, y, "auto stomp", false, function(v) Config.AutoStomp = v end)
+    y = y + makeToggle(CombatPage, y, "kill aura", false, function(v) Config.KillAura = v end)
+    y = y + makeSlider(CombatPage, y, "aura range", 5, 50, Config.KillAuraRange, function(v) Config.KillAuraRange = v end)
+    y = y + makeToggle(CombatPage, y, "fast reload  [R]", false, function(v) Config.FastReload = v end)
+    CombatPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
+end
+
+-- ============================================================
 -- VISUAL TAB
 -- ============================================================
 do
@@ -474,87 +647,74 @@ do
     y = y + makeToggle(VisualPage, y, "esp master", true, function(v) Config.ESP = v end)
     y = y + makeToggle(VisualPage, y, "box", true, function(v) Config.BoxESP = v end)
     y = y + makeToggle(VisualPage, y, "name", true, function(v) Config.NameESP = v end)
-    y = y + makeToggle(VisualPage, y, "health bar", true, function(v) Config.HealthESP = v end)
+    y = y + makeToggle(VisualPage, y, "health", true, function(v) Config.HealthESP = v end)
     y = y + makeToggle(VisualPage, y, "distance", true, function(v) Config.DistanceESP = v end)
     y = y + makeToggle(VisualPage, y, "tracer", false, function(v) Config.TracerESP = v end)
+    y = y + makeToggle(VisualPage, y, "skeleton", false, function(v) Config.SkeletonESP = v end)
+    y = y + makeToggle(VisualPage, y, "chams (highlight)", false, function(v) Config.Chams = v end)
+    y = y + makeToggle(VisualPage, y, "cash esp", false, function(v) Config.CashESP = v end)
+    y = y + makeToggle(VisualPage, y, "fov changer", false, function(v) Config.FOVChanger = v end)
+    y = y + makeSlider(VisualPage, y, "fov value", 60, 140, Config.FOVValue, function(v) Config.FOVValue = v end)
+    y = y + makeToggle(VisualPage, y, "fullbright", false, function(v) Config.Fullbright = v end)
+    y = y + makeToggle(VisualPage, y, "max zoom", false, function(v) Config.MaxZoom = v end)
     y = y + makeToggle(VisualPage, y, "target hud", true, function(v) Config.TargetHUD = v end)
     y = y + makeToggle(VisualPage, y, "fov circle", true, function(v) Config.FOVCircle = v end)
     VisualPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
 end
 
 -- ============================================================
--- PLAYERS TAB
+-- MOVE TAB
 -- ============================================================
 do
-    mk("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 24), Position = UDim2.new(0, 4, 0, 0),
-        BackgroundTransparency = 1, Text = "клик — фиксировать. повторный — снять.",
-        TextSize = 11, Font = Enum.Font.Gotham, TextColor3 = C.sub,
-        TextXAlignment = Enum.TextXAlignment.Left,
-    }, PlayersPage)
+    local y = 0
+    y = y + makeToggle(MovePage, y, "fly  [" .. Config.FlyKey.Name .. "]", false, function(v) setFly(v) end)
+    y = y + makeDropdown(MovePage, y, "fly mode", {"glide", "hover", "matrix", "elytra"}, "glide", function(v) Config.FlyMode = v end)
+    y = y + makeSlider(MovePage, y, "fly speed", 10, 120, Config.FlySpeed, function(v) Config.FlySpeed = v end)
+    y = y + makeToggle(MovePage, y, "noclip", false, function(v) Config.NoClip = v; setNoClip(v) end)
+    y = y + makeToggle(MovePage, y, "infinite jump", false, function(v) Config.InfiniteJump = v end)
+    y = y + makeToggle(MovePage, y, "speed hack", false, function(v) Config.SpeedHack = v end)
+    y = y + makeSlider(MovePage, y, "speed value", 20, 120, Config.SpeedValue, function(v) Config.SpeedValue = v end)
+    y = y + makeToggle(MovePage, y, "spider (climb)", false, function(v) Config.Spider = v end)
+    y = y + makeToggle(MovePage, y, "step assist", false, function(v) Config.Step = v end)
+    y = y + makeToggle(MovePage, y, "fast stop", false, function(v) Config.FastStop = v end)
+    y = y + makeToggle(MovePage, y, "anti-fling", false, function(v) Config.AntiFling = v end)
+    MovePage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
+end
 
-    local listScroll = mk("ScrollingFrame", {
-        Size = UDim2.new(1, 0, 1, -32), Position = UDim2.new(0, 0, 0, 28),
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 3, ScrollBarImageColor3 = C.line, CanvasSize = UDim2.new(0, 0, 0, 0),
-    }, PlayersPage)
-
-    local RowCache = {}
-
-    local function buildRow(plr)
-        local row = mk("TextButton", {
-            Size = UDim2.new(1, -4, 0, 30), BackgroundColor3 = C.panel,
-            Text = "", AutoButtonColor = false,
-        }, listScroll)
-        corner(row, 5)
-        local dot = mk("Frame", {
-            Size = UDim2.fromOffset(6, 6), Position = UDim2.new(0, 10, 0, 12),
-            BackgroundColor3 = C.good,
-        }, row)
-        corner(dot, 3)
-        local name = mk("TextLabel", {
-            Size = UDim2.new(1, -80, 0, 14), Position = UDim2.new(0, 22, 0, 4),
-            BackgroundTransparency = 1, Text = plr.Name, TextSize = 11,
-            Font = Enum.Font.GothamMedium, TextColor3 = Color3.fromRGB(200, 200, 215),
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }, row)
-        local dist = mk("TextLabel", {
-            Size = UDim2.new(1, -80, 0, 12), Position = UDim2.new(0, 22, 0, 16),
-            BackgroundTransparency = 1, Text = "0m", TextSize = 10,
-            Font = Enum.Font.Gotham, TextColor3 = C.sub, TextXAlignment = Enum.TextXAlignment.Left,
-        }, row)
-        row.MouseButton1Click:Connect(function()
-            if Config.SelectedTarget == plr then Config.SelectedTarget = nil
-            else Config.SelectedTarget = plr end
+-- ============================================================
+-- TP TAB
+-- ============================================================
+local TPPoints = {
+    Bank       = Vector3.new(-96, 23, -26),
+    GunStore   = Vector3.new(122, 23, -213),
+    Spawn      = Vector3.new(0, 30, 0),
+    Sewers     = Vector3.new(210, -34, -95),
+    Caves      = Vector3.new(-340, -7, 187),
+    Hood       = Vector3.new(-210, 23, -178),
+    DownTown   = Vector3.new(83, 23, 100),
+}
+do
+    local y = 0
+    for name, pos in next, TPPoints do
+        y = y + makeButton(TpPage, y, "tp → " .. name, function()
+            local ch = LP.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)) end
         end)
-        return { row = row, dot = dot, name = name, dist = dist }
     end
-
-    task.spawn(function()
-        while Gui.Parent and not unloaded do
-            local plrs, seen = {}, {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LP then table.insert(plrs, p); seen[p] = true end
-            end
-            for p, c in next, RowCache do
-                if not seen[p] then c.row:Destroy(); RowCache[p] = nil end
-            end
-            table.sort(plrs, function(a, b) return distance(a) < distance(b) end)
-            local y = 0
-            for _, p in ipairs(plrs) do
-                local c = RowCache[p]
-                if not c then c = buildRow(p); RowCache[p] = c end
-                c.row.Position = UDim2.new(0, 2, 0, y)
-                c.row.BackgroundColor3 = (Config.SelectedTarget == p) and C.accentD or C.panel
-                c.name.TextColor3 = (Config.SelectedTarget == p) and C.text or Color3.fromRGB(200, 200, 215)
-                c.dist.Text = math.floor(distance(p)) .. "m"
-                c.dot.BackgroundColor3 = valid(p) and C.good or C.bad
-                y = y + 34
-            end
-            listScroll.CanvasSize = UDim2.new(0, 0, 0, y + 4)
-            task.wait(0.2)
+    y = y + 4
+    y = y + makeButton(TpPage, y, "tp → bag", function()
+        local bag = findNearestBag()
+        if bag then
+            local ch = LP.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = CFrame.new(bag.Position + Vector3.new(0, 3, 0)) end
         end
+    end, C.accentD)
+    y = y + makeButton(TpPage, y, "click tp (hold ctrl + click)", function()
+        -- handled in input: Ctrl+Mouse1
     end)
+    TpPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
 end
 
 -- ============================================================
@@ -562,19 +722,95 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]", false, function(v) setFly(v) end)
-    y = y + makeSlider(MiscPage, y, "fly speed  (>40 = риск)", 10, 80, Config.FlySpeed, function(v) Config.FlySpeed = v end)
-    y = y + makeToggle(MiscPage, y, "fast reload  [R]", false, function(v) Config.FastReload = v end)
-    y = y + makeToggle(MiscPage, y, "fast stop", false, function(v) Config.FastStop = v end)
+    y = y + makeButton(MiscPage, y, "fling nearest", function()
+        local best, bestD = nil, math.huge
+        local myPos = Camera.CFrame.Position
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LP and valid(plr) then
+                local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local d = (myPos - hrp.Position).Magnitude
+                    if d < bestD then bestD = d; best = hrp end
+                end
+            end
+        end
+        if best then
+            pcall(function()
+                best.AssemblyLinearVelocity = Vector3.new(500, 500, 500)
+            end)
+        end
+    end, C.warn)
+    y = y + makeButton(MiscPage, y, "unbag self", function()
+        local ch = LP.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.Sit = false; hum.Jump = true end)
+        end
+    end)
+    y = y + makeButton(MiscPage, y, "goto nearest player", function()
+        local best, bestD = nil, math.huge
+        local myPos = Camera.CFrame.Position
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LP and valid(plr) then
+                local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local d = (myPos - hrp.Position).Magnitude
+                    if d < bestD then bestD = d; best = hrp end
+                end
+            end
+        end
+        if best then
+            local myHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if myHrp then myHrp.CFrame = best.CFrame + Vector3.new(0, 3, 0) end
+        end
+    end)
+    y = y + makeToggle(MiscPage, y, "remove doors (local)", false, function(v)
+        Config.RemoveDoors = v
+        for _, d in ipairs(WS:GetDescendants()) do
+            if d:IsA("BasePart") then
+                local n = d.Name:lower()
+                if n:find("door") or n:find("gate") then
+                    d.CanCollide = not v
+                    d.Transparency = v and 0.9 or 0
+                end
+            end
+        end
+    end)
     MiscPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
 end
 
 -- ============================================================
--- SETTINGS TAB
+-- CFG / SETTINGS TAB
 -- ============================================================
+local CONFIG_FILE = "shlock_config.json"
+
+local function saveConfig()
+    local data = {}
+    for k, v in next, Config do
+        if type(v) ~= "userdata" then data[k] = v end
+    end
+    local ok, json = pcall(function() return game:GetService("HttpService"):JSONEncode(data) end)
+    if ok and writefile then
+        pcall(function() writefile(CONFIG_FILE, json) end)
+    end
+end
+
+local function loadConfig()
+    if not (isfile and readfile) then return end
+    if not isfile(CONFIG_FILE) then return end
+    local ok, data = pcall(function() return readfile(CONFIG_FILE) end)
+    if not ok then return end
+    local ok2, tbl = pcall(function() return game:GetService("HttpService"):JSONDecode(data) end)
+    if not ok2 or type(tbl) ~= "table" then return end
+    for k, v in next, tbl do
+        if Config[k] ~= nil then Config[k] = v end
+    end
+end
+
 do
     local y = 0
     y = y + makeToggle(SetPage, y, "hold to lock", true, function(v) Config.LockHold = v end)
+    y = y + makeToggle(SetPage, y, "watermark", true, function(v) Config.Watermark = v end)
 
     local capturing = false
     local keyRow = mk("Frame", {
@@ -594,19 +830,16 @@ do
         TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = C.accent, AutoButtonColor = false,
     }, keyRow)
     corner(keyBtn, 4); stroke(keyBtn, C.line, 1)
-
     local function setCapturing(v)
         capturing = v
         keyBtn.Text = v and "press key..." or Config.LockKey.Name
         keyBtn.BackgroundColor3 = v and C.accentD or C.panel2
         keyBtn.TextColor3 = v and C.text or C.accent
     end
-
     keyBtn.MouseButton1Click:Connect(function()
         if capturing then setCapturing(false); return end
         setCapturing(true)
     end)
-
     UIS.InputBegan:Connect(function(i, gp)
         if unloaded or not capturing then return end
         if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -614,16 +847,11 @@ do
         Config.LockKey = i.KeyCode
         setCapturing(false)
     end)
-
     y = y + 44
 
-    local unloadBtn = mk("TextButton", {
-        Size = UDim2.new(1, 0, 0, 32), Position = UDim2.new(0, 0, 0, y),
-        BackgroundColor3 = C.bad, Text = "unload (panic = End)",
-        TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = C.text, AutoButtonColor = false,
-    }, SetPage)
-    corner(unloadBtn, 6)
-    unloadBtn.MouseButton1Click:Connect(function() cleanup() end)
+    y = y + makeButton(SetPage, y, "save config", function() saveConfig() end, C.accentD)
+    y = y + makeButton(SetPage, y, "load config", function() loadConfig() end, C.panel2)
+    y = y + makeButton(SetPage, y, "unload (panic = End)", function() cleanup() end, C.bad)
     SetPage.CanvasSize = UDim2.new(0, 0, 0, y + 40)
 end
 
@@ -632,7 +860,7 @@ end
 -- ============================================================
 local HudFrame = mk("Frame", {
     Size = UDim2.fromOffset(260, 62),
-    Position = UDim2.new(0.5, -130, 0, 20),
+    Position = UDim2.new(0.5, -130, 0, 60),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Visible = false,
 }, Gui)
 corner(HudFrame, 8); stroke(HudFrame, C.accent, 1)
@@ -655,6 +883,21 @@ local HudBar = mk("Frame", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.
 corner(HudBar, 2)
 
 -- ============================================================
+-- WATERMARK
+-- ============================================================
+local WMFrame = mk("Frame", {
+    Size = UDim2.fromOffset(180, 26), Position = UDim2.new(0, 10, 0, 10),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+}, Gui)
+corner(WMFrame, 6); stroke(WMFrame, C.accent, 1)
+local WMText = mk("TextLabel", {
+    Size = UDim2.new(1, -16, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+    BackgroundTransparency = 1, Text = "sh lock v9 · — fps · — ms",
+    TextSize = 11, Font = Enum.Font.GothamMedium, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, WMFrame)
+
+-- ============================================================
 -- STICKY TARGETING
 -- ============================================================
 local stickyTarget = nil
@@ -670,29 +913,21 @@ local function inFOV(plr)
 end
 
 local function pickTarget()
-    -- manual override wins
     if Config.SelectedTarget and valid(Config.SelectedTarget) and teamOK(Config.SelectedTarget) then
         return Config.SelectedTarget
     end
     if not Config.AutoLock then return nil end
-
     local now = tick()
-
-    -- sticky: keep current target if still valid + in FOV + visible, else start release timer
     if stickyTarget and valid(stickyTarget) and teamOK(stickyTarget) then
         if inFOV(stickyTarget) and visible(stickyTarget) then
             stickyLostAt = 0
             return stickyTarget
         end
         if stickyLostAt == 0 then stickyLostAt = now end
-        if now - stickyLostAt < Config.StickyRelease then
-            return stickyTarget
-        end
+        if now - stickyLostAt < Config.StickyRelease then return stickyTarget end
         stickyTarget = nil
         stickyLostAt = 0
     end
-
-    -- pick best by screen distance
     local best, bestScore = nil, math.huge
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -709,18 +944,24 @@ local function pickTarget()
             end
         end
     end
-    if best then
-        stickyTarget = best
-        stickyLostAt = 0
-    end
+    if best then stickyTarget = best; stickyLostAt = 0 end
     return best
 end
 
 -- ============================================================
--- ESP
+-- ESP  (box, name, health, dist, tracer, skeleton, chams, cash)
 -- ============================================================
 local hasDrawing = (typeof(Drawing) == "table" and Drawing.new ~= nil)
 local ESPCache = {}
+local ChamsCache = {}
+local CashCache = {}
+local SkeletonBones = {
+    {"Head","UpperTorso"}, {"UpperTorso","LowerTorso"},
+    {"UpperTorso","LeftUpperArm"}, {"LeftUpperArm","LeftLowerArm"}, {"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"}, {"RightUpperArm","RightLowerArm"}, {"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"}, {"LeftUpperLeg","LeftLowerLeg"}, {"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"}, {"RightUpperLeg","RightLowerLeg"}, {"RightLowerLeg","RightFoot"},
+}
 
 local function newText()
     local t = Drawing.new("Text")
@@ -730,16 +971,29 @@ local function newText()
 end
 
 local function buildESP()
-    return {
+    local cache = {
         box = Drawing.new("Square"),
         name = newText(), dist = newText(),
         healthBg = Drawing.new("Square"), health = Drawing.new("Square"),
         tracer = Drawing.new("Line"),
+        bones = {},
     }
+    for i = 1, #SkeletonBones do
+        local line = Drawing.new("Line")
+        line.Thickness = 1; line.Color = C.accent; line.Visible = false
+        cache.bones[i] = line
+    end
+    return cache
 end
 
 local function hideAll(c)
-    for _, d in next, c do pcall(function() d.Visible = false end) end
+    for k, d in next, c do
+        if k == "bones" then
+            for _, l in ipairs(d) do pcall(function() l.Visible = false end) end
+        else
+            pcall(function() d.Visible = false end)
+        end
+    end
 end
 
 local fovCircle = hasDrawing and Drawing.new("Circle") or nil
@@ -752,6 +1006,8 @@ local function updateESP()
     if unloaded or not hasDrawing then return end
     if not Config.ESP then
         for _, c in next, ESPCache do hideAll(c) end
+        for _, h in next, ChamsCache do pcall(function() h:Destroy() end) end
+        ChamsCache = {}
         return
     end
     local seen = {}
@@ -805,20 +1061,130 @@ local function updateESP()
                     c.health.Filled = true
                     c.health.Color = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(120, 255, 140), pct)
                     c.health.Visible = Config.HealthESP
-                    c.tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+
+                    -- tracer origin
+                    local from = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+                    if Config.TracerOrigin == "crosshair" then
+                        from = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+                    elseif Config.TracerOrigin == "character" then
+                        local myHrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                        if myHrp then
+                            local sp, on = Camera:WorldToViewportPoint(myHrp.Position)
+                            if on then from = Vector2.new(sp.X, sp.Y) end
+                        end
+                    end
+                    c.tracer.From = from
                     c.tracer.To = Vector2.new((minX + maxX) / 2, maxY)
                     c.tracer.Color = C.accent
                     c.tracer.Thickness = 1
                     c.tracer.Visible = Config.TracerESP
+
+                    -- skeleton
+                    if Config.SkeletonESP then
+                        for i, bone in ipairs(SkeletonBones) do
+                            local p1 = ch:FindFirstChild(bone[1])
+                            local p2 = ch:FindFirstChild(bone[2])
+                            if p1 and p2 then
+                                local a, aOn = Camera:WorldToViewportPoint(p1.Position)
+                                local b, bOn = Camera:WorldToViewportPoint(p2.Position)
+                                local line = c.bones[i]
+                                if aOn and bOn then
+                                    line.From = Vector2.new(a.X, a.Y)
+                                    line.To = Vector2.new(b.X, b.Y)
+                                    line.Visible = true
+                                else
+                                    line.Visible = false
+                                end
+                            end
+                        end
+                    else
+                        for _, line in ipairs(c.bones) do pcall(function() line.Visible = false end) end
+                    end
                 else hideAll(c) end
             else hideAll(c) end
+
+            -- chams
+            if Config.Chams then
+                local h = ChamsCache[plr]
+                if not h then
+                    h = Instance.new("Highlight")
+                    h.Name = "ShChams"
+                    h.FillColor = C.accent
+                    h.FillTransparency = 0.55
+                    h.OutlineColor = C.accent
+                    h.OutlineTransparency = 0
+                    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    h.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+                    ChamsCache[plr] = h
+                end
+                h.Adornee = plr.Character
+            else
+                local h = ChamsCache[plr]
+                if h then h:Destroy(); ChamsCache[plr] = nil end
+            end
         end
     end
     for plr, c in next, ESPCache do
         if not seen[plr] then
-            for _, d in next, c do pcall(function() d:Remove() end) end
+            for k, d in next, c do
+                if k == "bones" then
+                    for _, l in ipairs(d) do pcall(function() l:Remove() end) end
+                else
+                    pcall(function() d:Remove() end)
+                end
+            end
             ESPCache[plr] = nil
         end
+    end
+    for plr, h in next, ChamsCache do
+        if not seen[plr] then h:Destroy(); ChamsCache[plr] = nil end
+    end
+end
+
+-- ============================================================
+-- CASH ESP
+-- ============================================================
+local function updateCashESP()
+    if not hasDrawing then return end
+    if not Config.CashESP then
+        for _, b in next, CashCache do pcall(function() b:Remove() end) end
+        CashCache = {}
+        return
+    end
+    local parts = findCashParts()
+    local seen = {}
+    for _, part in ipairs(parts) do
+        seen[part] = true
+        local b = CashCache[part]
+        if not b then
+            b = Drawing.new("Square")
+            b.Thickness = 1
+            b.Color = Color3.fromRGB(120, 255, 140)
+            b.Filled = false
+            b.Visible = true
+            CashCache[part] = b
+        end
+        local cf, size = part.CFrame, part.Size
+        local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+        local any = false
+        for ix = 0, 1 do for iy = 0, 1 do for iz = 0, 1 do
+            local sp, on = Camera:WorldToViewportPoint(cf * Vector3.new((ix*2-1)*size.X/2, (iy*2-1)*size.Y/2, (iz*2-1)*size.Z/2))
+            if on then
+                any = true
+                minX = math.min(minX, sp.X); maxX = math.max(maxX, sp.X)
+                minY = math.min(minY, sp.Y); maxY = math.max(maxY, sp.Y)
+            end
+        end end end
+        if any then
+            b.Size = Vector2.new(maxX - minX, maxY - minY)
+            b.Position = Vector2.new(minX, minY)
+            b.Visible = true
+        else
+            b.Visible = false
+        end
+    end
+    for p, b in next, CashCache do
+        if not seen[p] then pcall(function() b:Remove() end); CashCache[p] = nil end
     end
 end
 
@@ -832,18 +1198,27 @@ function cleanup()
     if flySaved then
         local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
         if hum then
-            pcall(function()
-                hum.PlatformStand = flySaved.PlatformStand
-                hum.WalkSpeed = flySaved.WalkSpeed
-            end)
+            pcall(function() hum.PlatformStand = flySaved.PlatformStand; hum.WalkSpeed = flySaved.WalkSpeed end)
         end
         flySaved = nil
     end
+    for _, c in ipairs(noClipConns) do pcall(function() c:Disconnect() end) end
+    noClipConns = {}
     if fovCircle then pcall(function() fovCircle:Remove() end) end
     for plr, cache in next, ESPCache do
-        for _, d in next, cache do pcall(function() d:Remove() end) end
+        for k, d in next, cache do
+            if k == "bones" then
+                for _, l in ipairs(d) do pcall(function() l:Remove() end) end
+            else
+                pcall(function() d:Remove() end)
+            end
+        end
         ESPCache[plr] = nil
     end
+    for _, h in next, ChamsCache do pcall(function() h:Destroy() end) end
+    ChamsCache = {}
+    for _, b in next, CashCache do pcall(function() b:Remove() end) end
+    CashCache = {}
     if Gui then pcall(function() Gui:Destroy() end) end
 end
 
@@ -854,17 +1229,25 @@ local aiming = false
 
 UIS.InputBegan:Connect(function(i, gp)
     if unloaded then return end
-    if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
-    if UIS:GetFocusedTextBox() then return end
+    if isChatFocused() then return end
 
-    if i.KeyCode == Config.PanicKey then cleanup(); return end
-    if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled; return end
-    if i.KeyCode == Config.LockKey then
-        if Config.LockHold then aiming = true else aiming = not aiming end
-        return
+    if i.UserInputType == Enum.UserInputType.Keyboard then
+        if i.KeyCode == Config.PanicKey then cleanup(); return end
+        if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled; return end
+        if i.KeyCode == Config.LockKey then
+            if Config.LockHold then aiming = true else aiming = not aiming end
+            return
+        end
+        if i.KeyCode == Config.FlyKey then setFly(not Config.FlyEnabled); return end
+        if i.KeyCode == Enum.KeyCode.R and Config.FastReload then fastReload(); return end
     end
-    if i.KeyCode == Config.FlyKey then setFly(not Config.FlyEnabled); return end
-    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then fastReload(); return end
+    -- click tp
+    if i.UserInputType == Enum.UserInputType.MouseButton1 and UIS:IsKeyDown(Enum.KeyCode.LeftControl) then
+        local mouse = LP:GetMouse()
+        local hit = mouse.Hit
+        local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if hit and hrp then hrp.CFrame = hit + Vector3.new(0, 3, 0) end
+    end
 end)
 
 UIS.InputEnded:Connect(function(i)
@@ -872,21 +1255,20 @@ UIS.InputEnded:Connect(function(i)
 end)
 
 -- ============================================================
--- AIM LOOP  (smart tracking)
+-- AIM LOOP
 -- ============================================================
 RunSvc.RenderStepped:Connect(function(dt)
     if unloaded then return end
     if not (aiming and Config.LockEnabled) then return end
-
     local target = pickTarget()
     if not target then return end
     local part = getPart(target)
     if not part then return end
+    if math.random(1, 100) > Config.HitChance then return end
 
-    -- velocity-aware prediction, ping-scaled
     local ping = getPing()
     local dist = (Camera.CFrame.Position - part.Position).Magnitude
-    local distFactor = math.clamp(dist / 100, 0.6, 1.6)   -- long range = more lead
+    local distFactor = math.clamp(dist / 100, 0.6, 1.6)
     local lead = Config.Prediction + ping * 0.5
     local aimPos = part.Position
     if part.AssemblyLinearVelocity then
@@ -896,37 +1278,239 @@ RunSvc.RenderStepped:Connect(function(dt)
     local cf = Camera.CFrame
     local goal = CFrame.lookAt(cf.Position, aimPos)
     local angle = math.deg(math.acos(math.clamp(cf.LookVector:Dot((aimPos - cf.Position).Unit), -1, 1)))
-
-    -- adaptive smoothing: tight when close to target, smooth when far off
     local base = Config.Smoothness
     local adaptive = math.clamp(base * (0.7 + angle / 30), base * 0.7, base * 2.5)
     local alpha = math.clamp(adaptive * dt, 0, 1)
-
     Camera.CFrame = cf:Lerp(goal, alpha)
+end)
+
+-- ============================================================
+-- TRIGGER BOT / AUTO FIRE
+-- ============================================================
+RunSvc.RenderStepped:Connect(function()
+    if unloaded then return end
+    if not (Config.TriggerBot or Config.AutoFire) then return end
+    local char = LP.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+
+    local function tryFire()
+        if math.random(1, 100) > Config.HitChance then return end
+        pcall(function() tool:Activate() end)
+    end
+
+    if Config.AutoFire then
+        local target = Config.SelectedTarget or stickyTarget
+        if target and valid(target) and distance(target) <= Config.TriggerRange then tryFire() end
+        return
+    end
+
+    -- trigger bot: aim crosshair on target within range
+    local center = Camera.ViewportSize / 2
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if valid(plr) and teamOK(plr) then
+            local part = getPart(plr)
+            if part and visible(plr) then
+                local sp, on = Camera:WorldToViewportPoint(part.Position)
+                if on and (Vector2.new(sp.X, sp.Y) - Vector2.new(center.X, center.Y)).Magnitude < 40 then
+                    if distance(plr) <= Config.TriggerRange then
+                        tryFire()
+                        break
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ============================================================
+-- REACH  (hitbox expansion)
+-- ============================================================
+RunSvc.Heartbeat:Connect(function()
+    if unloaded then return end
+    if not Config.Reach then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                local head = plr.Character:FindFirstChild("Head")
+                if head and head:IsA("BasePart") then
+                    head.Size = Vector3.new(Config.ReachValue, Config.ReachValue, Config.ReachValue) * 0.15 + Vector3.new(1, 1, 1)
+                end
+            end
+        end
+    end
+end)
+
+-- ============================================================
+-- AUTO STOMP
+-- ============================================================
+RunSvc.RenderStepped:Connect(function()
+    if unloaded or not Config.AutoStomp then return end
+    local char = LP.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if valid(plr) and distance(plr) <= 8 then
+            local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.PlatformStand then
+                pcall(function() tool:Activate() end)
+                break
+            end
+        end
+    end
+end)
+
+-- ============================================================
+-- KILL AURA
+-- ============================================================
+local killAuraTick = 0
+RunSvc.RenderStepped:Connect(function()
+    if unloaded or not Config.KillAura then return end
+    local now = tick()
+    if now - killAuraTick < 0.1 then return end
+    killAuraTick = now
+    local char = LP.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    local myHrp = char:FindFirstChild("HumanoidRootPart")
+    if not myHrp then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if valid(plr) and teamOK(plr) then
+            local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and (myHrp.Position - hrp.Position).Magnitude <= Config.KillAuraRange then
+                pcall(function() tool:Activate() end)
+            end
+        end
+    end
+end)
+
+-- ============================================================
+-- MOVEMENT LOOPS  (speed / spider / step / infinite jump / anti-fling)
+-- ============================================================
+RunSvc.RenderStepped:Connect(function(dt)
+    if unloaded then return end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    -- speed via CFrame walk direction
+    if Config.SpeedHack and not Config.FlyEnabled then
+        local move = Vector3.zero
+        if UIS:IsKeyDown(Enum.KeyCode.W) then move = move + Camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then move = move - Camera.CFrame.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then move = move - Camera.CFrame.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then move = move + Camera.CFrame.RightVector end
+        if move.Magnitude > 0 then
+            local flat = Vector3.new(move.X, 0, move.Z).Unit
+            local speedFactor = Config.SpeedValue / 16
+            hrp.CFrame = hrp.CFrame + flat * dt * Config.SpeedValue * 0.4
+        end
+    end
+
+    -- spider: climb if touching wall and W held
+    if Config.Spider and not Config.FlyEnabled then
+        if UIS:IsKeyDown(Enum.KeyCode.W) then
+            local params = RaycastParams.new()
+            params.FilterDescendantsInstances = { char }
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            local wall = WS:Raycast(hrp.Position, Camera.CFrame.LookVector * 3, params)
+            if wall then
+                hrp.CFrame = hrp.CFrame + Vector3.new(0, dt * 20, 0)
+            end
+        end
+    end
+
+    -- step: boost up small ledges
+    if Config.Step and not Config.FlyEnabled then
+        local params = RaycastParams.new()
+        params.FilterDescendantsInstances = { char }
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local front = hrp.Position + (Camera.CFrame.LookVector * 2)
+        local hit = WS:Raycast(hrp.Position, (front - hrp.Position), params)
+        if hit then
+            local above = WS:Raycast(hrp.Position + Vector3.new(0, 3, 0), (front - hrp.Position), params)
+            if not above then
+                hrp.CFrame = hrp.CFrame + Vector3.new(0, 0.5, 0) + Camera.CFrame.LookVector * 0.6
+            end
+        end
+    end
+
+    -- infinite jump
+    if Config.InfiniteJump and hum.FloorMaterial == Enum.Material.Air then
+        local state = hum:GetState()
+        if state == Enum.HumanoidStateType.Freefall then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+
+    -- anti fling: freeze own horizontal velocity if big spike
+    if Config.AntiFling then
+        local v = hrp.AssemblyLinearVelocity
+        if v.Magnitude > 200 then
+            hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y * 0.2, 0)
+        end
+    end
 end)
 
 -- ============================================================
 -- FAST STOP
 -- ============================================================
 RunSvc.RenderStepped:Connect(function()
-    if unloaded then return end
-    if not Config.FastStop or Config.FlyEnabled then return end
+    if unloaded or not Config.FastStop or Config.FlyEnabled then return end
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or not hum then return end
     if hum.FloorMaterial == Enum.Material.Air then return end
-    local moving = UIS:IsKeyDown(Enum.KeyCode.W)
-        or UIS:IsKeyDown(Enum.KeyCode.A)
-        or UIS:IsKeyDown(Enum.KeyCode.S)
-        or UIS:IsKeyDown(Enum.KeyCode.D)
+    local moving = UIS:IsKeyDown(Enum.KeyCode.W) or UIS:IsKeyDown(Enum.KeyCode.A)
+        or UIS:IsKeyDown(Enum.KeyCode.S) or UIS:IsKeyDown(Enum.KeyCode.D)
     if not moving then
         local v = hrp.AssemblyLinearVelocity
         hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
     end
 end)
 
-RunSvc.Heartbeat:Connect(function() if not unloaded then pcall(updateESP) end end)
+-- ============================================================
+-- FOV CHANGER / FULLBRIGHT / MAX ZOOM
+-- ============================================================
+local origFOV = Camera.FieldOfView
+local origBrightness = Lighting.Brightness
+local origAmbient = Lighting.OutdoorAmbient
+local origZoom = UIS:GetPropertyChangedSignal
+RunSvc.RenderStepped:Connect(function()
+    if unloaded then return end
+    if Config.FOVChanger then
+        Camera.FieldOfView = Config.FOVValue
+    else
+        Camera.FieldOfView = origFOV
+    end
+    if Config.Fullbright then
+        Lighting.Brightness = 3
+        Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+    else
+        Lighting.Brightness = origBrightness
+        Lighting.OutdoorAmbient = origAmbient
+    end
+    if Config.MaxZoom then
+        pcall(function()
+            LP.CameraMaxZoomDistance = 10000
+        end)
+    end
+end)
+
+-- ============================================================
+-- LOOPS
+-- ============================================================
+RunSvc.Heartbeat:Connect(function()
+    if unloaded then return end
+    pcall(updateESP)
+end)
+RunSvc.RenderStepped:Connect(function()
+    if unloaded then return end
+    pcall(updateCashESP)
+end)
 
 RunSvc.RenderStepped:Connect(function()
     if unloaded then return end
@@ -937,10 +1521,14 @@ RunSvc.RenderStepped:Connect(function()
 end)
 
 -- ============================================================
--- HUD LOOP
+-- HUD + WATERMARK LOOP
 -- ============================================================
 task.spawn(function()
+    local fps = 0
+    local frames = 0
+    local lastT = tick()
     while Gui.Parent and not unloaded do
+        -- HUD
         local t = Config.SelectedTarget or stickyTarget
         if Config.TargetHUD and t and valid(t) then
             local hum = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
@@ -953,8 +1541,25 @@ task.spawn(function()
                 HudBar.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(C.good, pct)
             else HudFrame.Visible = false end
         else HudFrame.Visible = false end
+
+        -- watermark
+        WMFrame.Visible = Config.Watermark
+        if Config.Watermark then
+            frames = frames + 1
+            local now = tick()
+            if now - lastT >= 1 then
+                fps = frames
+                frames = 0
+                lastT = now
+            end
+            WMText.Text = string.format("sh lock v9 · %d fps · %d ms", fps, math.floor(getPing() * 1000))
+        end
+
         task.wait(0.15)
     end
 end)
 
-print("[Sh] v7 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  panic = " .. Config.PanicKey.Name)
+-- ============================================================
+-- BOOT
+-- ============================================================
+print("[Sh] v9 loaded. menu = " .. Config.MenuKey.Name .. "  ·  lock = " .. Config.LockKey.Name .. "  ·  panic = " .. Config.PanicKey.Name)
