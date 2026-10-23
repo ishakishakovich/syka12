@@ -1,101 +1,140 @@
--- crumb | dahood all-in-one
--- Executor: Synapse/Delta/Fluxus (sUNC high for hookmetamethod)
--- Game: Da Hood (2788229376) and copies
--- Contains: Rayfield menu, aimlock (nearest in view, camera-priority), ESP, fast reload (multiplier slider)
+-- Dahood | Multi-Lock + Player List + Auto FastReload/FastStop (toggle-based)
+-- RightShift = открыть/закрыть меню. Всё остальное — чекбоксами.
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+local Camera           = Workspace.CurrentCamera
+local LocalPlayer      = Players.LocalPlayer
 
 -- ============================================================
--- SERVICES
--- ============================================================
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
-local Workspace         = game:GetService("Workspace")
-local LocalPlayer       = Players.LocalPlayer
-
--- ============================================================
--- CONFIG
+-- CONFIG (значения по умолчанию)
 -- ============================================================
 local Config = {
-    aimlock = {
-        enabled        = false,
-        key            = Enum.KeyCode.E,
-        prediction     = 0.165,
-    },
-    esp = {
-        enabled        = false,
-        showNames      = true,
-        showDistance   = true,
-        fillColor      = Color3.fromRGB(180, 30, 30),
-        outlineColor   = Color3.fromRGB(255, 255, 255),
-        fillTransp     = 0.55,
-        textSize       = 14,
-    },
-    fastReload = {
-        enabled        = false,
-        multiplier     = 2.0,
-    },
+    ESP_Enabled     = true,
+    ESP_Box         = true,
+    ESP_Name        = true,
+    ESP_Health      = true,
+    ESP_Distance    = true,
+    ESP_Tracer      = true,
+    ESP_TeamCheck   = true,
+    ESP_MaxDistance = 1500,
+
+    Lock_Enabled    = false,
+    Lock_Key        = Enum.KeyCode.Q,
+    Lock_FOV        = 220,
+    Lock_Smooth     = 0.35,
+    Lock_VisibleOnly= false,
+    Lock_Part       = "Head",
+
+    -- Auto FastReload (постоянно включён, если true)
+    AutoFastReload  = false,
+    ReloadInterval  = 0.02,     -- как часто дёргать ремоут
+    ReloadAmmoCheck= true,      -- если false — долбит всегда, не проверяя патроны
+
+    -- Auto FastStop (постоянно включён, если true)
+    AutoFastStop    = false,
+    StopVelThreshold= 2,        -- если скорость > этого — гасим
+    StopTickRate    = 0.05,     -- раз в сколько секунд гасим velocity
+
+    -- UI
+    Menu_Key = Enum.KeyCode.RightShift,
 }
 
 -- ============================================================
--- MENU
+-- STATE
 -- ============================================================
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-
-local Window = Rayfield:CreateWindow({
-    Name = "crumb | dahood",
-    LoadingTitle = "crumb loading",
-    LoadingSubtitle = "lock / esp / reload",
-    Theme = "Default",
-    ToggleUIKeybind = "K",
-    ConfigurationSaving = { Enabled = false },
-})
+local State = {
+    LockedTargets   = {},
+    LockOrder       = {},
+    Drawings        = {},
+    MenuOpen        = false,
+    PlayerList      = {},
+    ListDrawings    = {},
+    ListClickable   = {},
+    Checkboxes      = {},   -- {label=, y0=, y1=, get=, set=}
+    ListX           = 20,
+    ListY           = 80,
+    RowH            = 20,
+    LastReload      = 0,
+    LastStopTick    = 0,
+}
 
 -- ============================================================
--- AIMLOCK (nearest target, camera-priority)
+-- HELPERS
 -- ============================================================
-local aimTarget = nil
+local function getChar(p) return p and p.Character end
+local function getHum(p)  local c=getChar(p); return c and c:FindFirstChildOfClass("Humanoid") end
+local function getRoot(p) local c=getChar(p); return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHead(p) local c=getChar(p); return c and c:FindFirstChild("Head") end
+local function isAlive(p) local h=getHum(p); return h and h.Health>0 end
+local function sameTeam(p)
+    if not Config.ESP_TeamCheck then return false end
+    return p.Team == LocalPlayer.Team
+end
 
-local function isPlayerValid(plr)
-    if not plr or plr == LocalPlayer then return false end
-    local char = plr.Character
-    if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    local effects = char:FindFirstChild("BodyEffects")
-    if effects then
-        local ko = effects:FindFirstChild("K.O")
-        if ko and ko.Value then return false end
+local function worldToScreen(pos)
+    local s,on = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(s.X,s.Y), on, s.Z
+end
+
+local function getDistance(p)
+    local r=getRoot(p); local mr=getRoot(LocalPlayer)
+    if not r or not mr then return math.huge end
+    return (r.Position-mr.Position).Magnitude
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.FilterDescendantsInstances = { LocalPlayer.Character }
+
+local function isVisible(p)
+    if not Config.Lock_VisibleOnly then return true end
+    local myHead = getHead(LocalPlayer)
+    local tPart = getChar(p) and getChar(p):FindFirstChild(Config.Lock_Part)
+    if not myHead or not tPart then return false end
+    local res = Workspace:Raycast(myHead.Position, tPart.Position-myHead.Position, rayParams)
+    if res and res.Instance then
+        return res.Instance:FindFirstAncestorOfClass("Model") == getChar(p)
     end
-    if char:FindFirstChild("GRABBING_CONSTRAINT") then return false end
-    if not char:FindFirstChild("HumanoidRootPart") then return false end
     return true
 end
 
-local function getNearestTarget()
-    local myChar = LocalPlayer.Character
-    if not myChar then return nil end
-    local myHrp = myChar:FindFirstChild("HumanoidRootPart")
-    if not myHrp then return nil end
+-- ============================================================
+-- LOCK LOGIC
+-- ============================================================
+local function addLock(p)
+    if not State.LockedTargets[p] then
+        State.LockedTargets[p]=true
+        table.insert(State.LockOrder,p)
+    end
+end
 
-    local cam = Workspace.CurrentCamera
-    local best, bestScore = nil, math.huge
+local function removeLock(p)
+    if State.LockedTargets[p] then
+        State.LockedTargets[p]=nil
+        for i=#State.LockOrder,1,-1 do
+            if State.LockOrder[i]==p then table.remove(State.LockOrder,i) end
+        end
+    end
+end
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if isPlayerValid(plr) then
-            local hrp = plr.Character.HumanoidRootPart
-            local head = plr.Character:FindFirstChild("Head") or hrp
-            local dist = (myHrp.Position - hrp.Position).Magnitude
+local function toggleLock(p)
+    if State.LockedTargets[p] then removeLock(p) else addLock(p) end
+end
 
-            if dist <= 350 then
-                local toTarget = (head.Position - cam.CFrame.Position).Unit
-                local lookDir = cam.CFrame.LookVector
-                local dot = toTarget:Dot(lookDir)
-                if dot > 0.35 then
-                    local score = dist * (2 - dot)
-                    if score < bestScore then
-                        bestScore = score
-                        best = {plr = plr, part = head}
-                    end
+local function pickActiveTarget()
+    local best,bestScore = nil,math.huge
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    for _,p in ipairs(State.LockOrder) do
+        if p.Parent and isAlive(p) and not sameTeam(p) and isVisible(p) then
+            local part=getChar(p) and getChar(p):FindFirstChild(Config.Lock_Part)
+            if part then
+                local sp,on=worldToScreen(part.Position)
+                if on then
+                    local d=(sp-center).Magnitude
+                    if d<bestScore then bestScore=d; best=p end
                 end
             end
         end
@@ -103,340 +142,343 @@ local function getNearestTarget()
     return best
 end
 
-RunService:BindToRenderStep("crumb_aimlock", Enum.RenderPriority.Camera.Value + 1, function()
-    if not Config.aimlock.enabled then return end
-    if not UserInputService:IsKeyDown(Config.aimlock.key) then return end
-
-    local target = getNearestTarget()
-    if not target then
-        aimTarget = nil
-        return
-    end
-    aimTarget = target
-
-    local part = target.part
-    if not part or not part.Parent then return end
-
-    local cam = Workspace.CurrentCamera
-    local camPos = cam.CFrame.Position
-    local vel = part.AssemblyLinearVelocity or part.Velocity or Vector3.zero
-    local hitPos = part.Position + (vel * Config.aimlock.prediction)
-
-    cam.CFrame = CFrame.lookAt(camPos, hitPos)
-end)
-
--- ============================================================
--- ESP
--- ============================================================
-local espHighlights = {}
-local espBillboards = {}
-
-local function cleanupESP(plr)
-    if espHighlights[plr] then
-        pcall(function() espHighlights[plr]:Destroy() end)
-        espHighlights[plr] = nil
-    end
-    if espBillboards[plr] then
-        pcall(function() espBillboards[plr]:Destroy() end)
-        espBillboards[plr] = nil
-    end
-end
-
-local function buildESP(plr)
-    if plr == LocalPlayer then return end
-    cleanupESP(plr)
-    local char = plr.Character
-    if not char then return end
-    local head = char:FindFirstChild("Head")
-    local hum  = char:FindFirstChildOfClass("Humanoid")
-    if not head or not hum or hum.Health <= 0 then return end
-
-    local hl = Instance.new("Highlight")
-    hl.Name               = "crumb_esp_hl"
-    hl.FillColor          = Config.esp.fillColor
-    hl.OutlineColor       = Config.esp.outlineColor
-    hl.FillTransparency   = Config.esp.fillTransp
-    hl.OutlineTransparency = 0
-    hl.Adornee            = char
-    hl.Parent             = char
-    espHighlights[plr]    = hl
-
-    local bb = Instance.new("BillboardGui")
-    bb.Name          = "crumb_esp_bb"
-    bb.Size          = UDim2.new(0, 200, 0, 40)
-    bb.StudsOffset   = Vector3.new(0, 2.2, 0)
-    bb.AlwaysOnTop   = true
-    bb.Adornee       = head
-    bb.Parent        = char
-
-    local label = Instance.new("TextLabel")
-    label.Size                 = UDim2.new(1, 0, 1, 0)
-    label.BackgroundTransparency = 1
-    label.TextColor3           = Color3.fromRGB(255, 255, 255)
-    label.TextStrokeTransparency = 0.2
-    label.TextSize             = Config.esp.textSize
-    label.Font                 = Enum.Font.GothamBold
-    label.Text                 = ""
-    label.Parent               = bb
-
-    espBillboards[plr] = bb
-end
-
-local function refreshAllESP()
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then
-            buildESP(plr)
+local function lockToTargets()
+    if not Config.Lock_Enabled then return end
+    local target=pickActiveTarget()
+    if target then
+        local part=getChar(target) and getChar(target):FindFirstChild(Config.Lock_Part)
+        if part then
+            local current=Camera.CFrame.LookVector
+            local desired=(part.Position-Camera.CFrame.Position).Unit
+            local newLook=current:Lerp(desired, 1-Config.Lock_Smooth)
+            Camera.CFrame=CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position+newLook)
         end
     end
 end
 
-local function destroyAllESP()
-    for plr in pairs(espHighlights) do cleanupESP(plr) end
-    for plr in pairs(espBillboards) do cleanupESP(plr) end
-end
-
-RunService.RenderStepped:Connect(function()
-    if not Config.esp.enabled then return end
-    if not Config.esp.showNames and not Config.esp.showDistance then return end
-    for plr, bb in pairs(espBillboards) do
-        if bb and bb.Parent and plr.Character then
-            local hrp  = plr.Character:FindFirstChild("HumanoidRootPart")
-            local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local label = bb:FindFirstChildOfClass("TextLabel")
-                if label then
-                    local parts = {}
-                    if Config.esp.showNames then
-                        table.insert(parts, plr.DisplayName)
-                    end
-                    if Config.esp.showDistance and myHrp then
-                        local dist = math.floor((myHrp.Position - hrp.Position).Magnitude)
-                        table.insert(parts, "[" .. dist .. "m]")
-                    end
-                    label.Text = table.concat(parts, " ")
+-- ============================================================
+-- AUTO FAST RELOAD
+-- ============================================================
+local function findReloadRemotes()
+    local remotes={}
+    local char=LocalPlayer.Character
+    if char then
+        local tool=char:FindFirstChildOfClass("Tool")
+        if tool then
+            for _,v in ipairs(tool:GetDescendants()) do
+                if v:IsA("RemoteEvent") and v.Name:lower():find("reload") then
+                    table.insert(remotes,v)
                 end
             end
         end
     end
-end)
-
--- ============================================================
--- FAST RELOAD (multiplier slider)
--- ============================================================
-local fastReloadConnections = {}
-local reloadedTools = {}
-local patchedAnimTracks = {}
-
-local function getMultiplier()
-    local m = Config.fastReload.multiplier
-    if type(m) ~= "number" or m < 1 then return 1 end
-    return m
-end
-
-local function applyMultiplierToTool(tool)
-    if not tool:IsA("Tool") then return end
-    if reloadedTools[tool] then return end
-    reloadedTools[tool] = true
-    local mult = getMultiplier()
-
-    -- свойства Tool, похожие на время перезарядки
-    local props = {"ReloadTime", "Cooldown", "ReloadSpeed", "ReloadDuration", "Reload"}
-    for _, propName in ipairs(props) do
-        local ok, val = pcall(function() return tool[propName] end)
-        if ok and type(val) == "number" and val > 0 then
-            pcall(function() tool[propName] = val / mult end)
+    local rs=game:GetService("ReplicatedStorage")
+    for _,v in ipairs(rs:GetDescendants()) do
+        if v:IsA("RemoteEvent") and v.Name:lower():find("reload") then
+            table.insert(remotes,v)
         end
     end
+    return remotes
+end
 
-    -- NumberValue / IntValue внутри Tool
-    for _, child in ipairs(tool:GetChildren()) do
-        if child:IsA("NumberValue") or child:IsA("IntValue") then
-            local n = child.Name:lower()
-            if n:find("reload") or n:find("cooldown") or n:find("duration") then
-                pcall(function() child.Value = child.Value / mult end)
+local function getCurrentAmmo()
+    local char=LocalPlayer.Character
+    if not char then return nil,nil end
+    local tool=char:FindFirstChildOfClass("Tool")
+    if not tool then return nil,nil end
+    local cur,max
+    for _,v in pairs(tool:GetDescendants()) do
+        if v:IsA("NumberValue") then
+            local n=v.Name:lower()
+            if n:find("ammo") or n:find("clip") or n:find("mag") then
+                if n:find("max") then max=v.Value
+                else cur=v.Value end
             end
         end
     end
-
-    -- анимации перезарядки, которые появятся позже
-    table.insert(fastReloadConnections, tool.ChildAdded:Connect(function(child)
-        if not Config.fastReload.enabled then return end
-        if not child:IsA("Animation") then return end
-        if not child.Name:lower():find("reload") then return end
-        task.spawn(function()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if not hum then return end
-            local animator = hum:FindFirstChildOfClass("Animator")
-            if not animator then return end
-            local track = animator:LoadAnimation(child)
-            track:Play()
-            task.wait(0.05)
-            track:AdjustSpeed(getMultiplier())
-            patchedAnimTracks[track] = true
-        end)
-    end))
+    return cur,max
 end
 
-local function scanCharacterForTools(char)
+local function fireReload()
+    local char=LocalPlayer.Character
     if not char then return end
-    for _, c in ipairs(char:GetChildren()) do
-        if c:IsA("Tool") then applyMultiplierToTool(c) end
+    local tool=char:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    local remotes=findReloadRemotes()
+    for _,r in ipairs(remotes) do
+        pcall(function() r:FireServer() end)
     end
-end
-
-local function enableFastReload()
-    if #fastReloadConnections > 0 then return end
-    local function hookChar(char)
-        task.wait(0.3)
-        if not Config.fastReload.enabled then return end
-        scanCharacterForTools(char)
-        table.insert(fastReloadConnections, char.ChildAdded:Connect(function(child)
-            if child:IsA("Tool") then applyMultiplierToTool(child) end
-        end))
-    end
-    if LocalPlayer.Character then hookChar(LocalPlayer.Character) end
-    table.insert(fastReloadConnections, LocalPlayer.CharacterAdded:Connect(hookChar))
-end
-
-local function disableFastReload()
-    for _, conn in ipairs(fastReloadConnections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    fastReloadConnections = {}
-    reloadedTools = {}
-    patchedAnimTracks = {}
-end
-
--- при изменении ползунка пересобираем хуки, чтобы новые значения применились к новым инструментам
-local function rebuildFastReload()
-    if not Config.fastReload.enabled then return end
-    disableFastReload()
-    enableFastReload()
-end
-
--- ============================================================
--- UI: ESP TAB
--- ============================================================
-local ESPTab = Window:CreateTab("ESP", nil)
-
-ESPTab:CreateToggle({
-    Name         = "ESP Enable",
-    CurrentValue = false,
-    Flag         = "esp_enable",
-    Callback     = function(bool)
-        Config.esp.enabled = bool
-        if bool then refreshAllESP() else destroyAllESP() end
-    end,
-})
-
-ESPTab:CreateToggle({
-    Name         = "Show Names",
-    CurrentValue = true,
-    Flag         = "esp_names",
-    Callback     = function(bool) Config.esp.showNames = bool end,
-})
-
-ESPTab:CreateToggle({
-    Name         = "Show Distance",
-    CurrentValue = true,
-    Flag         = "esp_distance",
-    Callback     = function(bool) Config.esp.showDistance = bool end,
-})
-
-ESPTab:CreateButton({
-    Name     = "Refresh ESP",
-    Callback = function() if Config.esp.enabled then refreshAllESP() end end,
-})
-
--- ============================================================
--- UI: MAIN TAB
--- ============================================================
-local MainTab = Window:CreateTab("Main", nil)
-
-MainTab:CreateSection("aimlock")
-
-MainTab:CreateToggle({
-    Name         = "Aimlock (hold key)",
-    CurrentValue = false,
-    Flag         = "aimlock_toggle",
-    Callback     = function(bool) Config.aimlock.enabled = bool end,
-})
-
-MainTab:CreateKeybind({
-    Name           = "Aimlock Key",
-    CurrentKeybind = "E",
-    HoldToInteract = false,
-    Flag           = "aimlock_key",
-    Callback       = function(key) Config.aimlock.key = key end,
-})
-
-MainTab:CreateSlider({
-    Name         = "Prediction",
-    Range        = {0, 500},
-    Increment    = 1,
-    Suffix       = "ms",
-    CurrentValue = 165,
-    Flag         = "prediction",
-    Callback     = function(value) Config.aimlock.prediction = value / 1000 end,
-})
-
-MainTab:CreateSection("reload")
-
-MainTab:CreateToggle({
-    Name         = "Fast Reload",
-    CurrentValue = false,
-    Flag         = "fastreload_toggle",
-    Callback     = function(bool)
-        Config.fastReload.enabled = bool
-        if bool then
-            enableFastReload()
-            Rayfield:Notify({
-                Title   = "fast reload",
-                Content = "x" .. tostring(getMultiplier()) .. " armed — equip a weapon",
-                Duration = 3,
-            })
-        else
-            disableFastReload()
+    for _,v in pairs(tool:GetDescendants()) do
+        if v:IsA("NumberValue") then
+            local n=v.Name:lower()
+            if n:find("reload") or n:find("cooldown") then
+                pcall(function() v.Value=0 end)
+            end
         end
-    end,
-})
+    end
+    pcall(function() tool:Activate() end)
+end
 
-MainTab:CreateSlider({
-    Name         = "Reload Multiplier",
-    Range        = {1, 10},
-    Increment    = 0.5,
-    Suffix       = "x",
-    CurrentValue = 2,
-    Flag         = "reload_mult",
-    Callback     = function(value)
-        Config.fastReload.multiplier = value
-        -- пересобираем хуки, чтобы новое значение применилось к уже экипированному оружию
-        rebuildFastReload()
-    end,
-})
+local function autoFastReloadTick()
+    if not Config.AutoFastReload then return end
+    local now=tick()
+    if now-State.LastReload < Config.ReloadInterval then return end
+
+    if Config.ReloadAmmoCheck then
+        local cur,max=getCurrentAmmo()
+        if cur and max and cur>=max then return end -- полный магазин, не трогаем
+    end
+    State.LastReload=now
+    fireReload()
+end
 
 -- ============================================================
--- CHARACTER LIFECYCLE
+-- AUTO FAST STOP
 -- ============================================================
-local function hookCharacter(plr)
-    plr.CharacterAdded:Connect(function()
-        task.wait(0.6)
-        if Config.esp.enabled then buildESP(plr) end
+local function autoFastStopTick()
+    if not Config.AutoFastStop then return end
+    local now=tick()
+    if now-State.LastStopTick < Config.StopTickRate then return end
+    State.LastStopTick=now
+
+    local char=LocalPlayer.Character
+    if not char then return end
+    local root=char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local vel=root.AssemblyLinearVelocity
+    local horiz=Vector3.new(vel.X,0,vel.Z).Magnitude
+    if horiz>Config.StopVelThreshold then
+        root.AssemblyLinearVelocity=Vector3.new(0,vel.Y,0)
+    end
+end
+
+-- ============================================================
+-- ESP
+-- ============================================================
+local function newDraw(cls,props)
+    local d=Drawing.new(cls)
+    for k,v in pairs(props) do d[k]=v end
+    return d
+end
+
+local function updateESP()
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LocalPlayer and not sameTeam(plr) then
+            local d=State.Drawings[plr]
+            if not d then
+                d={
+                    box=newDraw("Square",{Thickness=1,Color=Color3.fromRGB(255,0,0),Filled=false,Visible=false}),
+                    name=newDraw("Text",{Size=14,Center=true,Outline=true,Color=Color3.fromRGB(255,255,255),Visible=false}),
+                    health=newDraw("Text",{Size=12,Center=false,Outline=true,Color=Color3.fromRGB(0,255,0),Visible=false}),
+                    dist=newDraw("Text",{Size=12,Center=true,Outline=true,Color=Color3.fromRGB(255,255,255),Visible=false}),
+                    tracer=newDraw("Line",{Thickness=1,Color=Color3.fromRGB(255,0,0),Visible=false}),
+                }
+                State.Drawings[plr]=d
+            end
+            local char=getChar(plr)
+            local head=char and char:FindFirstChild("Head")
+            local root=char and char:FindFirstChild("HumanoidRootPart")
+            local hum=getHum(plr)
+            local locked=State.LockedTargets[plr]
+            local col=locked and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+            d.box.Color=col; d.tracer.Color=col
+
+            if Config.ESP_Enabled and head and root and hum and hum.Health>0 then
+                local hs,hon=worldToScreen(head.Position+Vector3.new(0,0.5,0))
+                local rs,ron=worldToScreen(root.Position-Vector3.new(0,3,0))
+                if hon and ron then
+                    local h=math.abs(hs.Y-rs.Y)
+                    local w=h*0.6
+                    local bpos=Vector2.new(hs.X-w/2,hs.Y)
+                    local bsize=Vector2.new(w,h)
+                    if Config.ESP_Box then d.box.Visible=true; d.box.Size=bsize; d.box.Position=bpos else d.box.Visible=false end
+                    if Config.ESP_Name then
+                        d.name.Visible=true
+                        d.name.Text=(locked and "[LOCK] " or "")..plr.DisplayName.." (@"..plr.Name..")"
+                        d.name.Position=Vector2.new(hs.X,hs.Y-16)
+                    else d.name.Visible=false end
+                    if Config.ESP_Health then
+                        d.health.Visible=true; d.health.Text="HP: "..math.floor(hum.Health)
+                        d.health.Position=Vector2.new(bpos.X+bsize.X+4,bpos.Y)
+                    else d.health.Visible=false end
+                    if Config.ESP_Distance then
+                        local dist=getDistance(plr)
+                        if dist<=Config.ESP_MaxDistance then
+                            d.dist.Visible=true; d.dist.Text=math.floor(dist).."m"
+                            d.dist.Position=Vector2.new(hs.X,hs.Y+h+4)
+                        else d.dist.Visible=false end
+                    else d.dist.Visible=false end
+                    if Config.ESP_Tracer then
+                        d.tracer.Visible=true
+                        d.tracer.From=Vector2.new(Camera.ViewportSize.X/2,Camera.ViewportSize.Y)
+                        d.tracer.To=Vector2.new(hs.X,hs.Y)
+                    else d.tracer.Visible=false end
+                else
+                    for _,x in pairs(d) do x.Visible=false end
+                end
+            else
+                for _,x in pairs(d) do x.Visible=false end
+            end
+        end
+    end
+    for plr,d in pairs(State.Drawings) do
+        if not plr.Parent then
+            for _,x in pairs(d) do x:Remove() end
+            State.Drawings[plr]=nil
+        end
+    end
+    for _,p in ipairs({table.unpack(State.LockOrder)}) do
+        if not p.Parent or not isAlive(p) then removeLock(p) end
+    end
+end
+
+-- ============================================================
+-- FOV
+-- ============================================================
+local fov=Drawing.new("Circle")
+fov.Thickness=1; fov.Color=Color3.fromRGB(255,255,255); fov.Visible=false; fov.Filled=false
+local function updateFov()
+    if Config.Lock_Enabled then
+        fov.Visible=true
+        fov.Position=Vector2.new(Camera.ViewportSize.X/2,Camera.ViewportSize.Y/2)
+        fov.Radius=Config.Lock_FOV
+    else fov.Visible=false end
+end
+
+-- ============================================================
+-- PLAYER LIST + MENU (чекбоксы)
+-- ============================================================
+local function refreshPlayerList()
+    local list={}
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LocalPlayer then
+            table.insert(list,{
+                player=plr,
+                displayName=plr.DisplayName,
+                name=plr.Name,
+                health=getHum(plr) and getHum(plr).Health or 0,
+                locked=State.LockedTargets[plr]==true,
+            })
+        end
+    end
+    table.sort(list, function(a,b)
+        if a.locked~=b.locked then return a.locked end
+        return a.displayName:lower()<b.displayName:lower()
     end)
+    State.PlayerList=list
 end
 
-for _, plr in ipairs(Players:GetPlayers()) do
-    hookCharacter(plr)
+local function clearMenu()
+    for _,d in ipairs(State.ListDrawings) do d:Remove() end
+    State.ListDrawings={}
+    State.ListClickable={}
+    State.Checkboxes={}
 end
-Players.PlayerAdded:Connect(hookCharacter)
 
-LocalPlayer.CharacterAdded:Connect(function()
-    if Config.esp.enabled then
-        task.wait(0.6)
-        refreshAllESP()
+local function drawMenu()
+    clearMenu()
+    if not State.MenuOpen then return end
+    local x=State.ListX; local y=State.ListY
+    local d
+
+    d=newDraw("Text",{Size=16,Center=false,Outline=true,Color=Color3.fromRGB(255,255,0),Visible=true})
+    d.Text="=== DAHOOD MENU ==="
+    d.Position=Vector2.new(x,y)
+    table.insert(State.ListDrawings,d); y=y+22
+
+    -- ====== Toggles ======
+    local function checkbox(label, getter, setter)
+        local val=getter()
+        local t=newDraw("Text",{Size=14,Center=false,Outline=true,Color=(val and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,80,80)),Visible=true})
+        t.Text=(val and "[X] " or "[ ] ")..label
+        t.Position=Vector2.new(x,y)
+        table.insert(State.ListDrawings,t)
+        State.Checkboxes[#State.Checkboxes+1]={y0=y,y1=y+18,fn=function() setter(not val) end}
+        y=y+State.RowH
+    end
+
+    checkbox("ESP",              function() return Config.ESP_Enabled end,  function(v) Config.ESP_Enabled=v end)
+    checkbox("Aim Assist (Q)",   function() return Config.Lock_Enabled end, function(v) Config.Lock_Enabled=v end)
+    checkbox("Auto FastReload",  function() return Config.AutoFastReload end, function(v) Config.AutoFastReload=v end)
+    checkbox("Auto FastStop",    function() return Config.AutoFastStop end,   function(v) Config.AutoFastStop=v end)
+    checkbox("Team Check",       function() return Config.ESP_TeamCheck end,  function(v) Config.ESP_TeamCheck=v end)
+
+    y=y+10
+    d=newDraw("Text",{Size=16,Center=false,Outline=true,Color=Color3.fromRGB(255,255,0),Visible=true})
+    d.Text="=== PLAYERS (click = toggle lock) | Locked: "..#State.LockOrder.." ==="
+    d.Position=Vector2.new(x,y)
+    table.insert(State.ListDrawings,d); y=y+22
+
+    for i,data in ipairs(State.PlayerList) do
+        local t=newDraw("Text",{Size=14,Center=false,Outline=true,Visible=true})
+        t.Color = data.locked and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,255,255)
+        local mark = data.locked and "[X] " or "[ ] "
+        t.Text = string.format("%s%s (@%s) HP:%d", mark, data.displayName, data.name, math.floor(data.health))
+        t.Position=Vector2.new(x,y)
+        table.insert(State.ListDrawings,t)
+        State.ListClickable[#State.ListClickable+1]={y0=y,y1=y+18,player=data.player}
+        y=y+State.RowH
+    end
+
+    d=newDraw("Text",{Size=12,Center=false,Outline=true,Color=Color3.fromRGB(180,180,180),Visible=true})
+    d.Text="RightShift = close menu"
+    d.Position=Vector2.new(x,y+10)
+    table.insert(State.ListDrawings,d)
+end
+
+-- ============================================================
+-- INPUT
+-- ============================================================
+UserInputService.InputBegan:Connect(function(input,gp)
+    if gp then return end
+    if input.KeyCode==Config.Menu_Key then
+        State.MenuOpen=not State.MenuOpen
+        if not State.MenuOpen then clearMenu() end
+        return
+    end
+    if input.KeyCode==Config.Lock_Key then
+        Config.Lock_Enabled=not Config.Lock_Enabled
+        return
+    end
+    if input.UserInputType==Enum.UserInputType.MouseButton1 and State.MenuOpen then
+        local mp=UserInputService:GetMouseLocation()
+        -- сначала проверяем чекбоксы
+        for _,cb in ipairs(State.Checkboxes) do
+            if mp.X>=State.ListX-5 and mp.X<=State.ListX+500 and mp.Y>=cb.y0 and mp.Y<=cb.y1 then
+                cb.fn()
+                return
+            end
+        end
+        -- потом список игроков
+        for _,c in ipairs(State.ListClickable) do
+            if mp.X>=State.ListX-5 and mp.X<=State.ListX+500 and mp.Y>=c.y0 and mp.Y<=c.y1 then
+                toggleLock(c.player)
+                refreshPlayerList()
+                return
+            end
+        end
     end
 end)
 
-Rayfield:LoadConfiguration()
+-- ============================================================
+-- MAIN LOOP
+-- ============================================================
+RunService.RenderStepped:Connect(function()
+    if not LocalPlayer.Character then return end
+    lockToTargets()
+    updateFov()
+    updateESP()
+    autoFastReloadTick()
+    autoFastStopTick()
+    if State.MenuOpen then
+        refreshPlayerList()
+        drawMenu()
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    State.LockedTargets={}
+    State.LockOrder={}
+end)
+
+print("[Dahood] Loaded. RightShift=menu. Toggles: ESP / Aim / AutoFastReload / AutoFastStop.")
