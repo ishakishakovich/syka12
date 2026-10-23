@@ -1,484 +1,309 @@
--- Dahood | Multi-Lock + Player List + Auto FastReload/FastStop (toggle-based)
--- RightShift = открыть/закрыть меню. Всё остальное — чекбоксами.
+-- language: Lua, target: Roblox (DaHood / universal), executor: Synapse/Fluxus
+-- menu + multi-target lock-on + name ESP. список игроков внутри окна.
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace        = game:GetService("Workspace")
-local Camera           = Workspace.CurrentCamera
-local LocalPlayer      = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
 
--- ============================================================
--- CONFIG (значения по умолчанию)
--- ============================================================
-local Config = {
-    ESP_Enabled     = true,
-    ESP_Box         = true,
-    ESP_Name        = true,
-    ESP_Health      = true,
-    ESP_Distance    = true,
-    ESP_Tracer      = true,
-    ESP_TeamCheck   = true,
-    ESP_MaxDistance = 1500,
+-- ====================== STATE ======================
+local selected = {}          -- [Player] = true  (выбранные цели)
+local espObjects = {}        -- [Player] = { billboard, highlight }
+local menuOpen = true
+local lockActive = false
+local lockKey = Enum.KeyCode.E
+local cycleKey = Enum.KeyCode.Q
 
-    Lock_Enabled    = false,
-    Lock_Key        = Enum.KeyCode.Q,
-    Lock_FOV        = 220,
-    Lock_Smooth     = 0.35,
-    Lock_VisibleOnly= false,
-    Lock_Part       = "Head",
+-- ====================== GUI ======================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "DH_MultiLock"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    -- Auto FastReload (постоянно включён, если true)
-    AutoFastReload  = false,
-    ReloadInterval  = 0.02,     -- как часто дёргать ремоут
-    ReloadAmmoCheck= true,      -- если false — долбит всегда, не проверяя патроны
+-- главное окно
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 520, 0, 380)
+Main.Position = UDim2.new(0.5, -260, 0.5, -190)
+Main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
 
-    -- Auto FastStop (постоянно включён, если true)
-    AutoFastStop    = false,
-    StopVelThreshold= 2,        -- если скорость > этого — гасим
-    StopTickRate    = 0.05,     -- раз в сколько секунд гасим velocity
+-- заголовок
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 32)
+Title.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+Title.Text = "  DAHOOD MULTI-LOCK"
+Title.TextColor3 = Color3.fromRGB(220, 220, 230)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 14
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Main
+Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 10)
 
-    -- UI
-    Menu_Key = Enum.KeyCode.RightShift,
-}
+-- кнопка закрытия
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 32, 0, 24)
+CloseBtn.Position = UDim2.new(1, -38, 0, 4)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = Main
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
 
--- ============================================================
--- STATE
--- ============================================================
-local State = {
-    LockedTargets   = {},
-    LockOrder       = {},
-    Drawings        = {},
-    MenuOpen        = false,
-    PlayerList      = {},
-    ListDrawings    = {},
-    ListClickable   = {},
-    Checkboxes      = {},   -- {label=, y0=, y1=, get=, set=}
-    ListX           = 20,
-    ListY           = 80,
-    RowH            = 20,
-    LastReload      = 0,
-    LastStopTick    = 0,
-}
+-- левая панель: список игроков
+local PlayerListFrame = Instance.new("ScrollingFrame")
+PlayerListFrame.Size = UDim2.new(0.55, -12, 1, -44)
+PlayerListFrame.Position = UDim2.new(0, 6, 0, 38)
+PlayerListFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+PlayerListFrame.BorderSizePixel = 0
+PlayerListFrame.ScrollBarThickness = 4
+PlayerListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+PlayerListFrame.Parent = Main
+Instance.new("UICorner", PlayerListFrame).CornerRadius = UDim.new(0, 8)
+local listLayout = Instance.new("UIListLayout", PlayerListFrame)
+listLayout.Padding = UDim.new(0, 4)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
--- ============================================================
--- HELPERS
--- ============================================================
-local function getChar(p) return p and p.Character end
-local function getHum(p)  local c=getChar(p); return c and c:FindFirstChildOfClass("Humanoid") end
-local function getRoot(p) local c=getChar(p); return c and c:FindFirstChild("HumanoidRootPart") end
-local function getHead(p) local c=getChar(p); return c and c:FindFirstChild("Head") end
-local function isAlive(p) local h=getHum(p); return h and h.Health>0 end
-local function sameTeam(p)
-    if not Config.ESP_TeamCheck then return false end
-    return p.Team == LocalPlayer.Team
+-- правая панель: управление
+local ControlFrame = Instance.new("Frame")
+ControlFrame.Size = UDim2.new(0.45, -18, 1, -44)
+ControlFrame.Position = UDim2.new(0.55, 6, 0, 38)
+ControlFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+ControlFrame.BorderSizePixel = 0
+ControlFrame.Parent = Main
+Instance.new("UICorner", ControlFrame).CornerRadius = UDim.new(0, 8)
+
+local function makeButton(text, yOffset, color)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 0, 32)
+    btn.Position = UDim2.new(0, 8, 0, yOffset)
+    btn.BackgroundColor3 = color or Color3.fromRGB(50, 50, 60)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(230, 230, 240)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 13
+    btn.Parent = ControlFrame
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
 end
 
-local function worldToScreen(pos)
-    local s,on = Camera:WorldToViewportPoint(pos)
-    return Vector2.new(s.X,s.Y), on, s.Z
-end
+local LockBtn = makeButton("LOCK SELECTED", 8, Color3.fromRGB(45, 120, 45))
+local UnlockBtn = makeButton("UNLOCK ALL", 48, Color3.fromRGB(120, 45, 45))
+local CycleBtn = makeButton("CYCLE TARGET", 88, Color3.fromRGB(55, 55, 85))
+local CloseMenuBtn = makeButton("HIDE MENU", 128, Color3.fromRGB(45, 45, 55))
 
-local function getDistance(p)
-    local r=getRoot(p); local mr=getRoot(LocalPlayer)
-    if not r or not mr then return math.huge end
-    return (r.Position-mr.Position).Magnitude
-end
+-- статус
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -16, 0, 48)
+StatusLabel.Position = UDim2.new(0, 8, 0, 176)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "LMB — toggle  |  Lock key: E  |  Cycle: Q"
+StatusLabel.TextColor3 = Color3.fromRGB(160, 160, 175)
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextSize = 11
+StatusLabel.TextWrapped = true
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = ControlFrame
 
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.FilterDescendantsInstances = { LocalPlayer.Character }
-
-local function isVisible(p)
-    if not Config.Lock_VisibleOnly then return true end
-    local myHead = getHead(LocalPlayer)
-    local tPart = getChar(p) and getChar(p):FindFirstChild(Config.Lock_Part)
-    if not myHead or not tPart then return false end
-    local res = Workspace:Raycast(myHead.Position, tPart.Position-myHead.Position, rayParams)
-    if res and res.Instance then
-        return res.Instance:FindFirstAncestorOfClass("Model") == getChar(p)
+-- ====================== СПИСОК ИГРОКОВ ======================
+local function rebuildPlayerList()
+    for _, child in ipairs(PlayerListFrame:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
     end
-    return true
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LocalPlayer then continue end
+        local entry = Instance.new("TextButton")
+        entry.Size = UDim2.new(1, -8, 0, 34)
+        entry.BackgroundColor3 = selected[plr] and Color3.fromRGB(45, 110, 45) or Color3.fromRGB(32, 32, 38)
+        entry.Text = (selected[plr] and "[x] " or "[ ] ") .. plr.Name
+        entry.TextColor3 = Color3.fromRGB(220, 220, 230)
+        entry.Font = Enum.Font.Gotham
+        entry.TextSize = 12
+        entry.TextXAlignment = Enum.TextXAlignment.Left
+        entry.Parent = PlayerListFrame
+        Instance.new("UICorner", entry).CornerRadius = UDim.new(0, 5)
+
+        entry.MouseButton1Click:Connect(function()
+            selected[plr] = not selected[plr]
+            if not selected[plr] then selected[plr] = nil end
+            rebuildPlayerList()
+            updateESP()
+        end)
+    end
+    PlayerListFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 8)
 end
 
--- ============================================================
--- LOCK LOGIC
--- ============================================================
-local function addLock(p)
-    if not State.LockedTargets[p] then
-        State.LockedTargets[p]=true
-        table.insert(State.LockOrder,p)
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        updateESP()
+    end)
+    rebuildPlayerList()
+end)
+Players.PlayerRemoving:Connect(function(plr)
+    selected[plr] = nil
+    if espObjects[plr] then
+        pcall(function()
+            espObjects[plr].billboard:Remove()
+            espObjects[plr].highlight:Destroy()
+        end)
+        espObjects[plr] = nil
     end
+    rebuildPlayerList()
+end)
+
+-- ====================== ESP ======================
+local function createESPForPlayer(plr)
+    if espObjects[plr] then return end
+    local char = plr.Character
+    if not char or not char:FindFirstChild("Head") then return end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "DH_ESP"
+    billboard.Size = UDim2.new(0, 200, 0, 40)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = char.Head
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0.6, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = plr.Name
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextStrokeTransparency = 0.3
+    nameLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextSize = 14
+    nameLabel.Parent = billboard
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = char
+    highlight.FillColor = Color3.fromRGB(255, 60, 60)
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.FillTransparency = 0.65
+    highlight.OutlineTransparency = 0
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = char
+
+    espObjects[plr] = { billboard = billboard, highlight = highlight }
 end
 
-local function removeLock(p)
-    if State.LockedTargets[p] then
-        State.LockedTargets[p]=nil
-        for i=#State.LockOrder,1,-1 do
-            if State.LockOrder[i]==p then table.remove(State.LockOrder,i) end
-        end
-    end
-end
-
-local function toggleLock(p)
-    if State.LockedTargets[p] then removeLock(p) else addLock(p) end
-end
-
-local function pickActiveTarget()
-    local best,bestScore = nil,math.huge
-    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-    for _,p in ipairs(State.LockOrder) do
-        if p.Parent and isAlive(p) and not sameTeam(p) and isVisible(p) then
-            local part=getChar(p) and getChar(p):FindFirstChild(Config.Lock_Part)
-            if part then
-                local sp,on=worldToScreen(part.Position)
-                if on then
-                    local d=(sp-center).Magnitude
-                    if d<bestScore then bestScore=d; best=p end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function lockToTargets()
-    if not Config.Lock_Enabled then return end
-    local target=pickActiveTarget()
-    if target then
-        local part=getChar(target) and getChar(target):FindFirstChild(Config.Lock_Part)
-        if part then
-            local current=Camera.CFrame.LookVector
-            local desired=(part.Position-Camera.CFrame.Position).Unit
-            local newLook=current:Lerp(desired, 1-Config.Lock_Smooth)
-            Camera.CFrame=CFrame.new(Camera.CFrame.Position, Camera.CFrame.Position+newLook)
-        end
-    end
-end
-
--- ============================================================
--- AUTO FAST RELOAD
--- ============================================================
-local function findReloadRemotes()
-    local remotes={}
-    local char=LocalPlayer.Character
-    if char then
-        local tool=char:FindFirstChildOfClass("Tool")
-        if tool then
-            for _,v in ipairs(tool:GetDescendants()) do
-                if v:IsA("RemoteEvent") and v.Name:lower():find("reload") then
-                    table.insert(remotes,v)
-                end
-            end
-        end
-    end
-    local rs=game:GetService("ReplicatedStorage")
-    for _,v in ipairs(rs:GetDescendants()) do
-        if v:IsA("RemoteEvent") and v.Name:lower():find("reload") then
-            table.insert(remotes,v)
-        end
-    end
-    return remotes
-end
-
-local function getCurrentAmmo()
-    local char=LocalPlayer.Character
-    if not char then return nil,nil end
-    local tool=char:FindFirstChildOfClass("Tool")
-    if not tool then return nil,nil end
-    local cur,max
-    for _,v in pairs(tool:GetDescendants()) do
-        if v:IsA("NumberValue") then
-            local n=v.Name:lower()
-            if n:find("ammo") or n:find("clip") or n:find("mag") then
-                if n:find("max") then max=v.Value
-                else cur=v.Value end
-            end
-        end
-    end
-    return cur,max
-end
-
-local function fireReload()
-    local char=LocalPlayer.Character
-    if not char then return end
-    local tool=char:FindFirstChildOfClass("Tool")
-    if not tool then return end
-    local remotes=findReloadRemotes()
-    for _,r in ipairs(remotes) do
-        pcall(function() r:FireServer() end)
-    end
-    for _,v in pairs(tool:GetDescendants()) do
-        if v:IsA("NumberValue") then
-            local n=v.Name:lower()
-            if n:find("reload") or n:find("cooldown") then
-                pcall(function() v.Value=0 end)
-            end
-        end
-    end
-    pcall(function() tool:Activate() end)
-end
-
-local function autoFastReloadTick()
-    if not Config.AutoFastReload then return end
-    local now=tick()
-    if now-State.LastReload < Config.ReloadInterval then return end
-
-    if Config.ReloadAmmoCheck then
-        local cur,max=getCurrentAmmo()
-        if cur and max and cur>=max then return end -- полный магазин, не трогаем
-    end
-    State.LastReload=now
-    fireReload()
-end
-
--- ============================================================
--- AUTO FAST STOP
--- ============================================================
-local function autoFastStopTick()
-    if not Config.AutoFastStop then return end
-    local now=tick()
-    if now-State.LastStopTick < Config.StopTickRate then return end
-    State.LastStopTick=now
-
-    local char=LocalPlayer.Character
-    if not char then return end
-    local root=char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local vel=root.AssemblyLinearVelocity
-    local horiz=Vector3.new(vel.X,0,vel.Z).Magnitude
-    if horiz>Config.StopVelThreshold then
-        root.AssemblyLinearVelocity=Vector3.new(0,vel.Y,0)
-    end
-end
-
--- ============================================================
--- ESP
--- ============================================================
-local function newDraw(cls,props)
-    local d=Drawing.new(cls)
-    for k,v in pairs(props) do d[k]=v end
-    return d
+local function removeESPForPlayer(plr)
+    local data = espObjects[plr]
+    if not data then return end
+    pcall(function() data.billboard:Destroy() end)
+    pcall(function() data.highlight:Destroy() end)
+    espObjects[plr] = nil
 end
 
 local function updateESP()
-    for _,plr in ipairs(Players:GetPlayers()) do
-        if plr~=LocalPlayer and not sameTeam(plr) then
-            local d=State.Drawings[plr]
-            if not d then
-                d={
-                    box=newDraw("Square",{Thickness=1,Color=Color3.fromRGB(255,0,0),Filled=false,Visible=false}),
-                    name=newDraw("Text",{Size=14,Center=true,Outline=true,Color=Color3.fromRGB(255,255,255),Visible=false}),
-                    health=newDraw("Text",{Size=12,Center=false,Outline=true,Color=Color3.fromRGB(0,255,0),Visible=false}),
-                    dist=newDraw("Text",{Size=12,Center=true,Outline=true,Color=Color3.fromRGB(255,255,255),Visible=false}),
-                    tracer=newDraw("Line",{Thickness=1,Color=Color3.fromRGB(255,0,0),Visible=false}),
-                }
-                State.Drawings[plr]=d
-            end
-            local char=getChar(plr)
-            local head=char and char:FindFirstChild("Head")
-            local root=char and char:FindFirstChild("HumanoidRootPart")
-            local hum=getHum(plr)
-            local locked=State.LockedTargets[plr]
-            local col=locked and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
-            d.box.Color=col; d.tracer.Color=col
-
-            if Config.ESP_Enabled and head and root and hum and hum.Health>0 then
-                local hs,hon=worldToScreen(head.Position+Vector3.new(0,0.5,0))
-                local rs,ron=worldToScreen(root.Position-Vector3.new(0,3,0))
-                if hon and ron then
-                    local h=math.abs(hs.Y-rs.Y)
-                    local w=h*0.6
-                    local bpos=Vector2.new(hs.X-w/2,hs.Y)
-                    local bsize=Vector2.new(w,h)
-                    if Config.ESP_Box then d.box.Visible=true; d.box.Size=bsize; d.box.Position=bpos else d.box.Visible=false end
-                    if Config.ESP_Name then
-                        d.name.Visible=true
-                        d.name.Text=(locked and "[LOCK] " or "")..plr.DisplayName.." (@"..plr.Name..")"
-                        d.name.Position=Vector2.new(hs.X,hs.Y-16)
-                    else d.name.Visible=false end
-                    if Config.ESP_Health then
-                        d.health.Visible=true; d.health.Text="HP: "..math.floor(hum.Health)
-                        d.health.Position=Vector2.new(bpos.X+bsize.X+4,bpos.Y)
-                    else d.health.Visible=false end
-                    if Config.ESP_Distance then
-                        local dist=getDistance(plr)
-                        if dist<=Config.ESP_MaxDistance then
-                            d.dist.Visible=true; d.dist.Text=math.floor(dist).."m"
-                            d.dist.Position=Vector2.new(hs.X,hs.Y+h+4)
-                        else d.dist.Visible=false end
-                    else d.dist.Visible=false end
-                    if Config.ESP_Tracer then
-                        d.tracer.Visible=true
-                        d.tracer.From=Vector2.new(Camera.ViewportSize.X/2,Camera.ViewportSize.Y)
-                        d.tracer.To=Vector2.new(hs.X,hs.Y)
-                    else d.tracer.Visible=false end
-                else
-                    for _,x in pairs(d) do x.Visible=false end
-                end
-            else
-                for _,x in pairs(d) do x.Visible=false end
-            end
+    for plr, data in pairs(espObjects) do
+        if not selected[plr] or not plr.Character or not plr.Character:FindFirstChild("Head") then
+            removeESPForPlayer(plr)
         end
     end
-    for plr,d in pairs(State.Drawings) do
-        if not plr.Parent then
-            for _,x in pairs(d) do x:Remove() end
-            State.Drawings[plr]=nil
+    for plr in pairs(selected) do
+        if plr.Character and plr.Character:FindFirstChild("Head") then
+            createESPForPlayer(plr)
         end
-    end
-    for _,p in ipairs({table.unpack(State.LockOrder)}) do
-        if not p.Parent or not isAlive(p) then removeLock(p) end
     end
 end
 
--- ============================================================
--- FOV
--- ============================================================
-local fov=Drawing.new("Circle")
-fov.Thickness=1; fov.Color=Color3.fromRGB(255,255,255); fov.Visible=false; fov.Filled=false
-local function updateFov()
-    if Config.Lock_Enabled then
-        fov.Visible=true
-        fov.Position=Vector2.new(Camera.ViewportSize.X/2,Camera.ViewportSize.Y/2)
-        fov.Radius=Config.Lock_FOV
-    else fov.Visible=false end
-end
-
--- ============================================================
--- PLAYER LIST + MENU (чекбоксы)
--- ============================================================
-local function refreshPlayerList()
-    local list={}
-    for _,plr in ipairs(Players:GetPlayers()) do
-        if plr~=LocalPlayer then
-            table.insert(list,{
-                player=plr,
-                displayName=plr.DisplayName,
-                name=plr.Name,
-                health=getHum(plr) and getHum(plr).Health or 0,
-                locked=State.LockedTargets[plr]==true,
-            })
-        end
-    end
-    table.sort(list, function(a,b)
-        if a.locked~=b.locked then return a.locked end
-        return a.displayName:lower()<b.displayName:lower()
-    end)
-    State.PlayerList=list
-end
-
-local function clearMenu()
-    for _,d in ipairs(State.ListDrawings) do d:Remove() end
-    State.ListDrawings={}
-    State.ListClickable={}
-    State.Checkboxes={}
-end
-
-local function drawMenu()
-    clearMenu()
-    if not State.MenuOpen then return end
-    local x=State.ListX; local y=State.ListY
-    local d
-
-    d=newDraw("Text",{Size=16,Center=false,Outline=true,Color=Color3.fromRGB(255,255,0),Visible=true})
-    d.Text="=== DAHOOD MENU ==="
-    d.Position=Vector2.new(x,y)
-    table.insert(State.ListDrawings,d); y=y+22
-
-    -- ====== Toggles ======
-    local function checkbox(label, getter, setter)
-        local val=getter()
-        local t=newDraw("Text",{Size=14,Center=false,Outline=true,Color=(val and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,80,80)),Visible=true})
-        t.Text=(val and "[X] " or "[ ] ")..label
-        t.Position=Vector2.new(x,y)
-        table.insert(State.ListDrawings,t)
-        State.Checkboxes[#State.Checkboxes+1]={y0=y,y1=y+18,fn=function() setter(not val) end}
-        y=y+State.RowH
-    end
-
-    checkbox("ESP",              function() return Config.ESP_Enabled end,  function(v) Config.ESP_Enabled=v end)
-    checkbox("Aim Assist (Q)",   function() return Config.Lock_Enabled end, function(v) Config.Lock_Enabled=v end)
-    checkbox("Auto FastReload",  function() return Config.AutoFastReload end, function(v) Config.AutoFastReload=v end)
-    checkbox("Auto FastStop",    function() return Config.AutoFastStop end,   function(v) Config.AutoFastStop=v end)
-    checkbox("Team Check",       function() return Config.ESP_TeamCheck end,  function(v) Config.ESP_TeamCheck=v end)
-
-    y=y+10
-    d=newDraw("Text",{Size=16,Center=false,Outline=true,Color=Color3.fromRGB(255,255,0),Visible=true})
-    d.Text="=== PLAYERS (click = toggle lock) | Locked: "..#State.LockOrder.." ==="
-    d.Position=Vector2.new(x,y)
-    table.insert(State.ListDrawings,d); y=y+22
-
-    for i,data in ipairs(State.PlayerList) do
-        local t=newDraw("Text",{Size=14,Center=false,Outline=true,Visible=true})
-        t.Color = data.locked and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,255,255)
-        local mark = data.locked and "[X] " or "[ ] "
-        t.Text = string.format("%s%s (@%s) HP:%d", mark, data.displayName, data.name, math.floor(data.health))
-        t.Position=Vector2.new(x,y)
-        table.insert(State.ListDrawings,t)
-        State.ListClickable[#State.ListClickable+1]={y0=y,y1=y+18,player=data.player}
-        y=y+State.RowH
-    end
-
-    d=newDraw("Text",{Size=12,Center=false,Outline=true,Color=Color3.fromRGB(180,180,180),Visible=true})
-    d.Text="RightShift = close menu"
-    d.Position=Vector2.new(x,y+10)
-    table.insert(State.ListDrawings,d)
-end
-
--- ============================================================
--- INPUT
--- ============================================================
-UserInputService.InputBegan:Connect(function(input,gp)
-    if gp then return end
-    if input.KeyCode==Config.Menu_Key then
-        State.MenuOpen=not State.MenuOpen
-        if not State.MenuOpen then clearMenu() end
-        return
-    end
-    if input.KeyCode==Config.Lock_Key then
-        Config.Lock_Enabled=not Config.Lock_Enabled
-        return
-    end
-    if input.UserInputType==Enum.UserInputType.MouseButton1 and State.MenuOpen then
-        local mp=UserInputService:GetMouseLocation()
-        -- сначала проверяем чекбоксы
-        for _,cb in ipairs(State.Checkboxes) do
-            if mp.X>=State.ListX-5 and mp.X<=State.ListX+500 and mp.Y>=cb.y0 and mp.Y<=cb.y1 then
-                cb.fn()
-                return
-            end
-        end
-        -- потом список игроков
-        for _,c in ipairs(State.ListClickable) do
-            if mp.X>=State.ListX-5 and mp.X<=State.ListX+500 and mp.Y>=c.y0 and mp.Y<=c.y1 then
-                toggleLock(c.player)
-                refreshPlayerList()
-                return
-            end
-        end
-    end
-end)
-
--- ============================================================
--- MAIN LOOP
--- ============================================================
-RunService.RenderStepped:Connect(function()
-    if not LocalPlayer.Character then return end
-    lockToTargets()
-    updateFov()
+-- обновление ESP при респавне
+RunService.Heartbeat:Connect(function()
     updateESP()
-    autoFastReloadTick()
-    autoFastStopTick()
-    if State.MenuOpen then
-        refreshPlayerList()
-        drawMenu()
+end)
+
+-- ====================== LOCK-ON ======================
+local lockedIndex = 1
+local function getSelectedList()
+    local list = {}
+    for plr in pairs(selected) do
+        if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                table.insert(list, plr)
+            end
+        end
+    end
+    return list
+end
+
+local function lockCameraToPlayer(plr)
+    if not plr or not plr.Character then return end
+    local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local targetPos = hrp.Position + Vector3.new(0, 1.5, 0)
+    local currentCF = Camera.CFrame
+    local newCF = CFrame.new(currentCF.Position, targetPos)
+    Camera.CFrame = Camera.CFrame:Lerp(newCF, 0.35)
+end
+
+local function cycleTarget()
+    local list = getSelectedList()
+    if #list == 0 then return end
+    lockedIndex = (lockedIndex % #list) + 1
+end
+
+-- ====================== KEYBINDS ======================
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == lockKey then
+        lockActive = not lockActive
+    elseif input.KeyCode == cycleKey then
+        cycleTarget()
+    elseif input.KeyCode == Enum.KeyCode.V then
+        menuOpen = not menuOpen
+        Main.Visible = menuOpen
     end
 end)
 
-LocalPlayer.CharacterAdded:Connect(function()
-    State.LockedTargets={}
-    State.LockOrder={}
+-- ====================== КНОПКИ ======================
+LockBtn.MouseButton1Click:Connect(function()
+    if #getSelectedList() == 0 then
+        StatusLabel.Text = "no targets selected."
+        return
+    end
+    lockActive = true
+    StatusLabel.Text = "locked: " .. #getSelectedList() .. " target(s)"
 end)
 
-print("[Dahood] Loaded. RightShift=menu. Toggles: ESP / Aim / AutoFastReload / AutoFastStop.")
+UnlockBtn.MouseButton1Click:Connect(function()
+    lockActive = false
+    StatusLabel.Text = "unlocked."
+end)
+
+CycleBtn.MouseButton1Click:Connect(function()
+    cycleTarget()
+    local list = getSelectedList()
+    if #list > 0 then
+        StatusLabel.Text = "target: " .. list[lockedIndex].Name
+    end
+end)
+
+CloseMenuBtn.MouseButton1Click:Connect(function()
+    menuOpen = false
+    Main.Visible = false
+end)
+
+-- ====================== MAIN LOOP ======================
+RunService.RenderStepped:Connect(function()
+    if not lockActive then return end
+    local list = getSelectedList()
+    if #list == 0 then return end
+    if lockedIndex > #list then lockedIndex = 1 end
+    local target = list[lockedIndex]
+    if target and target.Character then
+        lockCameraToPlayer(target)
+    end
+end)
+
+-- ====================== INIT ======================
+rebuildPlayerList()
+Main.Visible = true
