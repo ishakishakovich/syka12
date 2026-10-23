@@ -1,6 +1,6 @@
 --!nonstrict
 -- ============================================================
--- [Sh] Da Hood Lock v4
+-- [Sh] Da Hood Lock v5
 -- luau | roblox executor | game: Da Hood
 -- ============================================================
 
@@ -11,11 +11,14 @@ local WS       = game:GetService("Workspace")
 local LP       = Players.LocalPlayer
 local Camera   = WS.CurrentCamera
 
+local unloaded = false
+
 local Config = {
     LockEnabled    = false,
     LockHold       = true,
     LockKey        = Enum.KeyCode.Q,
     MenuKey        = Enum.KeyCode.Insert,
+    PanicKey       = Enum.KeyCode.End,
     TargetPart     = "Head",
     FOV            = 260,
     Smoothness     = 22,
@@ -38,7 +41,7 @@ local Config = {
 
     FlyEnabled   = false,
     FlyKey       = Enum.KeyCode.V,
-    FlySpeed     = 60,
+    FlySpeed     = 28,   -- default stealth cap
     FastReload   = false,
     FastStop     = false,
 }
@@ -106,30 +109,24 @@ local function visible(plr)
 end
 
 -- ============================================================
--- FLY
+-- FLY (stealth — CFrame, no body movers)
 -- ============================================================
 local flyConn = nil
+local flySaved = nil
 
 local function setFly(on)
+    if unloaded then return end
     Config.FlyEnabled = on
     local char = LP.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if on then
-        if not root then return end
+        if not hum then return end
         if flyConn then return end
-        local bv = Instance.new("BodyVelocity")
-        bv.Name = "ShFlyBV"
-        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-        bv.Velocity = Vector3.zero
-        bv.Parent = root
-        local bg = Instance.new("BodyGyro")
-        bg.Name = "ShFlyBG"
-        bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
-        bg.P = 9000
-        bg.D = 500
-        bg.Parent = root
-        flyConn = RunSvc.RenderStepped:Connect(function()
+        flySaved = { WalkSpeed = hum.WalkSpeed, PlatformStand = hum.PlatformStand }
+        hum.PlatformStand = true
+        hum.WalkSpeed = 0
+        flyConn = RunSvc.RenderStepped:Connect(function(dt)
+            if unloaded then return end
             local c = LP.Character
             local r = c and c:FindFirstChild("HumanoidRootPart")
             if not r then return end
@@ -141,25 +138,35 @@ local function setFly(on)
             if UIS:IsKeyDown(Enum.KeyCode.D) then move = move + cam.CFrame.RightVector end
             if UIS:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
             if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then move = move - Vector3.new(0, 1, 0) end
-            if move.Magnitude > 0 then move = move.Unit * Config.FlySpeed end
-            bv.Velocity = move
-            bg.CFrame = CFrame.new(r.Position, r.Position + cam.CFrame.LookVector)
+            if move.Magnitude > 0 then
+                move = move.Unit * Config.FlySpeed * dt
+            else
+                move = Vector3.new(0, -8 * dt, 0)
+            end
+            r.CFrame = r.CFrame + move
         end)
     else
         if flyConn then flyConn:Disconnect(); flyConn = nil end
-        if root then
-            local bv = root:FindFirstChild("ShFlyBV"); if bv then bv:Destroy() end
-            local bg = root:FindFirstChild("ShFlyBG"); if bg then bg:Destroy() end
+        if flySaved and hum then
+            hum.PlatformStand = flySaved.PlatformStand
+            hum.WalkSpeed = flySaved.WalkSpeed
+            flySaved = nil
         end
     end
 end
 
--- respawn handling
+LP.CharacterRemoving:Connect(function()
+    if flyConn then flyConn:Disconnect(); flyConn = nil end
+    flySaved = nil
+end)
+
 LP.CharacterAdded:Connect(function()
+    if unloaded then return end
     if Config.FlyEnabled then
         if flyConn then flyConn:Disconnect(); flyConn = nil end
+        flySaved = nil
         task.wait(0.5)
-        setFly(true)
+        if Config.FlyEnabled and not unloaded then setFly(true) end
     end
 end)
 
@@ -190,7 +197,7 @@ local titleDot = mk("Frame", { Size = UDim2.fromOffset(8, 8), Position = UDim2.n
 corner(titleDot, 4)
 mk("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 28, 0, 0),
-    BackgroundTransparency = 1, Text = "sh lock  ·  da hood  v4",
+    BackgroundTransparency = 1, Text = "sh lock  ·  da hood  v5",
     Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
 }, Head)
 
@@ -212,6 +219,7 @@ do
         end
     end)
     UIS.InputChanged:Connect(function(i)
+        if unloaded then return end
         if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
             local d = i.Position - dragStart
             Win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
@@ -229,7 +237,7 @@ local TabBar = mk("Frame", {
     Size = UDim2.new(1, -20, 0, 30), Position = UDim2.new(0, 10, 0, 44),
     BackgroundTransparency = 1,
 }, Win)
-local Tabs, activeTab = {}, nil
+local Tabs = {}
 local function makeTab(name, x)
     local b = mk("TextButton", {
         Size = UDim2.new(0, 78, 1, 0), Position = UDim2.new(0, x, 0, 0),
@@ -250,7 +258,6 @@ local function makeTab(name, x)
             t.btn.TextColor3 = C.sub; t.btn.BackgroundColor3 = C.panel; t.page.Visible = false
         end
         b.TextColor3 = C.text; b.BackgroundColor3 = C.accentD; page.Visible = true
-        activeTab = page
     end)
     return page
 end
@@ -263,7 +270,6 @@ local SetPage     = makeTab("settings", 336)
 Tabs["aim"].btn.TextColor3 = C.text
 Tabs["aim"].btn.BackgroundColor3 = C.accentD
 Tabs["aim"].page.Visible = true
-activeTab = Tabs["aim"].page
 
 -- ============================================================
 -- WIDGETS
@@ -332,6 +338,7 @@ local function makeSlider(parent, y, text, min, max, initial, cb)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
     end)
     UIS.InputChanged:Connect(function(i)
+        if unloaded then return end
         if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
             local rel = math.clamp((i.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
             local val = min + (max - min) * rel
@@ -455,7 +462,7 @@ do
     end
 
     task.spawn(function()
-        while Gui.Parent do
+        while Gui.Parent and not unloaded do
             local plrs, seen = {}, {}
             for _, p in ipairs(Players:GetPlayers()) do
                 if p ~= LP then table.insert(plrs, p); seen[p] = true end
@@ -486,8 +493,8 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]", false, function(v) setFly(v) end)
-    y = y + makeSlider(MiscPage, y, "fly speed", 10, 200, Config.FlySpeed, function(v) Config.FlySpeed = v end)
+    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]  stealth", false, function(v) setFly(v) end)
+    y = y + makeSlider(MiscPage, y, "fly speed  (>40 = риск)", 10, 80, Config.FlySpeed, function(v) Config.FlySpeed = v end)
     y = y + makeToggle(MiscPage, y, "fast reload  [R]", false, function(v) Config.FastReload = v end)
     y = y + makeToggle(MiscPage, y, "fast stop", false, function(v) Config.FastStop = v end)
     MiscPage.CanvasSize = UDim2.new(0, 0, 0, y + 8)
@@ -532,6 +539,7 @@ do
     end)
 
     UIS.InputBegan:Connect(function(i, gp)
+        if unloaded then return end
         if not capturing then return end
         if gp then return end
         if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -544,14 +552,11 @@ do
 
     local unloadBtn = mk("TextButton", {
         Size = UDim2.new(1, 0, 0, 32), Position = UDim2.new(0, 0, 0, y),
-        BackgroundColor3 = C.bad, Text = "unload",
+        BackgroundColor3 = C.bad, Text = "unload (panic = End)",
         TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = C.text, AutoButtonColor = false,
     }, SetPage)
     corner(unloadBtn, 6)
-    unloadBtn.MouseButton1Click:Connect(function()
-        if Config.FlyEnabled then setFly(false) end
-        Gui:Destroy()
-    end)
+    unloadBtn.MouseButton1Click:Connect(function() cleanup() end)
     SetPage.CanvasSize = UDim2.new(0, 0, 0, y + 40)
 end
 
@@ -611,86 +616,6 @@ local function pickTarget()
 end
 
 -- ============================================================
--- INPUT HANDLERS
--- ============================================================
-local aiming = false
-
-UIS.InputBegan:Connect(function(i, gp)
-    if gp then return end
-    if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled end
-    if i.KeyCode == Config.LockKey then
-        if Config.LockHold then aiming = true else aiming = not aiming end
-    end
-    if i.KeyCode == Config.FlyKey then
-        setFly(not Config.FlyEnabled)
-    end
-    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then
-        local char = LP.Character
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        local bp = LP:FindFirstChildOfClass("Backpack")
-        if tool and bp and char then
-            tool.Parent = bp
-            task.wait(0.02)
-            tool.Parent = char
-        end
-    end
-end)
-
-UIS.InputEnded:Connect(function(i)
-    if i.KeyCode == Config.LockKey and Config.LockHold then aiming = false end
-end)
-
--- ============================================================
--- AIM LOOP
--- ============================================================
-RunSvc.RenderStepped:Connect(function(dt)
-    if not (aiming and Config.LockEnabled) then return end
-    local target = pickTarget()
-    if not target then return end
-    local ch = target.Character
-    if not ch then return end
-    local part = ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("HumanoidRootPart")
-    if not part then return end
-
-    local pos = part.Position
-    if part.AssemblyLinearVelocity then
-        pos = pos + part.AssemblyLinearVelocity * Config.Prediction
-    end
-
-    local cf = Camera.CFrame
-    local dir = (pos - cf.Position).Unit
-    local angle = math.deg(math.acos(math.clamp(cf.LookVector:Dot(dir), -1, 1)))
-    local goal = CFrame.lookAt(cf.Position, pos)
-
-    if angle <= Config.SnapZone then
-        Camera.CFrame = goal
-    else
-        local alpha = math.clamp(Config.Smoothness * dt, 0, 1)
-        Camera.CFrame = cf:Lerp(goal, alpha)
-    end
-end)
-
--- ============================================================
--- FAST STOP LOOP
--- ============================================================
-RunSvc.RenderStepped:Connect(function()
-    if not Config.FastStop or Config.FlyEnabled then return end
-    local char = LP.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
-    if hum.FloorMaterial == Enum.Material.Air then return end
-    local moving = UIS:IsKeyDown(Enum.KeyCode.W)
-        or UIS:IsKeyDown(Enum.KeyCode.A)
-        or UIS:IsKeyDown(Enum.KeyCode.S)
-        or UIS:IsKeyDown(Enum.KeyCode.D)
-    if not moving then
-        local v = hrp.AssemblyLinearVelocity
-        hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
-    end
-end)
-
--- ============================================================
 -- ESP
 -- ============================================================
 local hasDrawing = (typeof(Drawing) == "table" and Drawing.new ~= nil)
@@ -723,7 +648,7 @@ if fovCircle then
 end
 
 local function updateESP()
-    if not hasDrawing then return end
+    if unloaded or not hasDrawing then return end
     if not Config.ESP then
         for _, c in next, ESPCache do hideAll(c) end
         return
@@ -796,20 +721,131 @@ local function updateESP()
     end
 end
 
+-- ============================================================
+-- CLEANUP (panic)
+-- ============================================================
+function cleanup()
+    if unloaded then return end
+    unloaded = true
+    -- kill fly first, restore humanoid
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
+    if flySaved then
+        local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function()
+                hum.PlatformStand = flySaved.PlatformStand
+                hum.WalkSpeed = flySaved.WalkSpeed
+            end)
+        end
+        flySaved = nil
+    end
+    -- remove drawings
+    if fovCircle then pcall(function() fovCircle:Remove() end) end
+    for plr, cache in next, ESPCache do
+        for _, d in next, cache do pcall(function() d:Remove() end) end
+        ESPCache[plr] = nil
+    end
+    -- remove gui
+    if Gui then pcall(function() Gui:Destroy() end) end
+end
+
+-- ============================================================
+-- INPUT HANDLERS
+-- ============================================================
+local aiming = false
+
+UIS.InputBegan:Connect(function(i, gp)
+    if unloaded then return end
+    if gp then return end
+    if i.KeyCode == Config.PanicKey then cleanup(); return end
+    if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled end
+    if i.KeyCode == Config.LockKey then
+        if Config.LockHold then aiming = true else aiming = not aiming end
+    end
+    if i.KeyCode == Config.FlyKey then setFly(not Config.FlyEnabled) end
+    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then
+        local char = LP.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local bp = LP:FindFirstChildOfClass("Backpack")
+        if tool and bp and char then
+            tool.Parent = bp
+            task.wait(0.02)
+            if not unloaded and tool then tool.Parent = char end
+        end
+    end
+end)
+
+UIS.InputEnded:Connect(function(i)
+    if i.KeyCode == Config.LockKey and Config.LockHold then aiming = false end
+end)
+
+-- ============================================================
+-- AIM LOOP
+-- ============================================================
+RunSvc.RenderStepped:Connect(function(dt)
+    if unloaded then return end
+    if not (aiming and Config.LockEnabled) then return end
+    local target = pickTarget()
+    if not target then return end
+    local ch = target.Character
+    if not ch then return end
+    local part = ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("HumanoidRootPart")
+    if not part then return end
+
+    local pos = part.Position
+    if part.AssemblyLinearVelocity then
+        pos = pos + part.AssemblyLinearVelocity * Config.Prediction
+    end
+
+    local cf = Camera.CFrame
+    local dir = (pos - cf.Position).Unit
+    local angle = math.deg(math.acos(math.clamp(cf.LookVector:Dot(dir), -1, 1)))
+    local goal = CFrame.lookAt(cf.Position, pos)
+
+    if angle <= Config.SnapZone then
+        Camera.CFrame = goal
+    else
+        local alpha = math.clamp(Config.Smoothness * dt, 0, 1)
+        Camera.CFrame = cf:Lerp(goal, alpha)
+    end
+end)
+
+-- ============================================================
+-- FAST STOP
+-- ============================================================
 RunSvc.RenderStepped:Connect(function()
+    if unloaded then return end
+    if not Config.FastStop or Config.FlyEnabled then return end
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+    if hum.FloorMaterial == Enum.Material.Air then return end
+    local moving = UIS:IsKeyDown(Enum.KeyCode.W)
+        or UIS:IsKeyDown(Enum.KeyCode.A)
+        or UIS:IsKeyDown(Enum.KeyCode.S)
+        or UIS:IsKeyDown(Enum.KeyCode.D)
+    if not moving then
+        local v = hrp.AssemblyLinearVelocity
+        hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+    end
+end)
+
+RunSvc.Heartbeat:Connect(function() if not unloaded then pcall(updateESP) end end)
+
+RunSvc.RenderStepped:Connect(function()
+    if unloaded then return end
     if not fovCircle then return end
     fovCircle.Visible = Config.FOVCircle and Config.LockEnabled
     fovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     fovCircle.Radius = Config.FOV
 end)
 
-RunSvc.Heartbeat:Connect(function() pcall(updateESP) end)
-
 -- ============================================================
 -- HUD LOOP
 -- ============================================================
 task.spawn(function()
-    while Gui.Parent do
+    while Gui.Parent and not unloaded do
         if Config.TargetHUD and Config.SelectedTarget and valid(Config.SelectedTarget) then
             local t = Config.SelectedTarget
             local hum = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
@@ -826,4 +862,4 @@ task.spawn(function()
     end
 end)
 
-print("[Sh] v4 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  reload = R  ·  menu = " .. Config.MenuKey.Name)
+print("[Sh] v5 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  menu = " .. Config.MenuKey.Name .. "  ·  panic = " .. Config.PanicKey.Name)
