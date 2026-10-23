@@ -1,12 +1,13 @@
 --!nonstrict
 -- ============================================================
--- [Sh] Da Hood Lock v5
+-- [Sh] Da Hood Lock v7  ·  plug & play
 -- luau | roblox executor | game: Da Hood
 -- ============================================================
 
 local Players  = game:GetService("Players")
 local RunSvc   = game:GetService("RunService")
 local UIS      = game:GetService("UserInputService")
+local Stats    = game:GetService("Stats")
 local WS       = game:GetService("Workspace")
 local LP       = Players.LocalPlayer
 local Camera   = WS.CurrentCamera
@@ -20,14 +21,14 @@ local Config = {
     MenuKey        = Enum.KeyCode.Insert,
     PanicKey       = Enum.KeyCode.End,
     TargetPart     = "Head",
-    FOV            = 260,
-    Smoothness     = 22,
-    SnapZone       = 3,
-    Prediction     = 0.165,
+    FOV            = 280,
+    Smoothness     = 28,          -- tuned — snappy but not robotic
+    Prediction     = 0.13,         -- base lag comp; auto-scaled by ping
     VisibleCheck   = true,
     TeamCheck      = false,
     AutoLock       = true,
     SelectedTarget = nil,
+    StickyRelease  = 0.35,         -- sec out of FOV before dropping target
 
     ESP          = true,
     BoxESP       = true,
@@ -41,7 +42,7 @@ local Config = {
 
     FlyEnabled   = false,
     FlyKey       = Enum.KeyCode.V,
-    FlySpeed     = 28,   -- default stealth cap
+    FlySpeed     = 28,
     FastReload   = false,
     FastStop     = false,
 }
@@ -71,6 +72,17 @@ local function stroke(o, c, t)
 end
 
 -- ============================================================
+-- PING + auto prediction
+-- ============================================================
+local function getPing()
+    local ok, v = pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    if ok and type(v) == "number" then return v / 1000 end
+    return 0.08
+end
+
+-- ============================================================
 -- VALIDATION
 -- ============================================================
 local function valid(plr)
@@ -87,18 +99,23 @@ local function teamOK(plr)
     return LP.Team.Name ~= plr.Team.Name
 end
 
-local function distance(plr)
+local function getPart(plr)
     local ch = plr.Character
-    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-    if not hrp then return math.huge end
-    return (Camera.CFrame.Position - hrp.Position).Magnitude
+    if not ch then return nil end
+    return ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart")
+end
+
+local function distance(plr)
+    local p = getPart(plr)
+    if not p then return math.huge end
+    return (Camera.CFrame.Position - p.Position).Magnitude
 end
 
 local function visible(plr)
     if not Config.VisibleCheck then return true end
     local ch = plr.Character
     if not ch then return false end
-    local part = ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("HumanoidRootPart")
+    local part = getPart(plr)
     if not part then return false end
     local params = RaycastParams.new()
     params.FilterDescendantsInstances = { LP.Character, Camera }
@@ -109,7 +126,7 @@ local function visible(plr)
 end
 
 -- ============================================================
--- FLY (stealth — CFrame, no body movers)
+-- FLY
 -- ============================================================
 local flyConn = nil
 local flySaved = nil
@@ -171,6 +188,59 @@ LP.CharacterAdded:Connect(function()
 end)
 
 -- ============================================================
+-- FAST RELOAD
+-- ============================================================
+local reloadDebounce = 0
+local function fastReload()
+    if unloaded then return end
+    local now = tick()
+    if now - reloadDebounce < 0.1 then return end
+    reloadDebounce = now
+
+    local char = LP.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not (hum and tool) then return end
+
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if animator then
+        local ok, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+        if ok and tracks then
+            for _, t in ipairs(tracks) do
+                local len = 0
+                pcall(function() len = t.Length end)
+                if len > 0.4 and len < 3 and t.TimePosition < len - 0.1 then
+                    pcall(function() t.TimePosition = len - 0.05 end)
+                end
+            end
+        end
+    end
+    for _, name in ipairs({"Reloading","IsReloading","Reload","ReloadState"}) do
+        local v = tool:FindFirstChild(name, true)
+        if v and v:IsA("BoolValue") then pcall(function() v.Value = false end) end
+    end
+    for _, pair in ipairs({
+        {"Ammo","MaxAmmo"}, {"Clip","MaxClip"}, {"Mag","MaxMag"},
+        {"CurrentAmmo","MaxAmmo"}, {"Bullets","MaxBullets"},
+    }) do
+        local cur = tool:FindFirstChild(pair[1], true)
+        local mx = tool:FindFirstChild(pair[2], true)
+        if cur and mx and (cur:IsA("IntValue") or cur:IsA("NumberValue")) and (mx:IsA("IntValue") or mx:IsA("NumberValue")) then
+            pcall(function() cur.Value = mx.Value end)
+        end
+    end
+    for _, child in ipairs(tool:GetDescendants()) do
+        if child:IsA("BindableEvent") then
+            local n = child.Name:lower()
+            if n:find("reload") or n:find("ammo") or n:find("clip") then
+                pcall(function() child:Fire() end)
+            end
+        end
+    end
+end
+
+-- ============================================================
 -- WINDOW
 -- ============================================================
 local Gui = Instance.new("ScreenGui")
@@ -197,7 +267,7 @@ local titleDot = mk("Frame", { Size = UDim2.fromOffset(8, 8), Position = UDim2.n
 corner(titleDot, 4)
 mk("TextLabel", {
     Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 28, 0, 0),
-    BackgroundTransparency = 1, Text = "sh lock  ·  da hood  v5",
+    BackgroundTransparency = 1, Text = "sh lock  ·  v7  auto",
     Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
 }, Head)
 
@@ -356,14 +426,13 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(AimPage, y, "lock enabled", false, function(v) Config.LockEnabled = v end)
-    y = y + makeToggle(AimPage, y, "auto lock (ближайший к прицелу)", true, function(v) Config.AutoLock = v end)
+    y = y + makeToggle(AimPage, y, "lock enabled  [" .. Config.LockKey.Name .. "]", false, function(v) Config.LockEnabled = v end)
+    y = y + makeToggle(AimPage, y, "auto lock", true, function(v) Config.AutoLock = v end)
     y = y + makeToggle(AimPage, y, "visible check", true, function(v) Config.VisibleCheck = v end)
     y = y + makeToggle(AimPage, y, "team check", false, function(v) Config.TeamCheck = v end)
-    y = y + makeSlider(AimPage, y, "fov", 50, 600, Config.FOV, function(v) Config.FOV = v end)
-    y = y + makeSlider(AimPage, y, "smoothness  (больше = быстрее)", 1, 40, Config.Smoothness, function(v) Config.Smoothness = v end)
-    y = y + makeSlider(AimPage, y, "snap zone (градусы)", 0, 15, Config.SnapZone, function(v) Config.SnapZone = v end)
-    y = y + makeSlider(AimPage, y, "prediction", 0, 0.4, Config.Prediction, function(v) Config.Prediction = v end)
+    y = y + makeSlider(AimPage, y, "fov", 80, 600, Config.FOV, function(v) Config.FOV = v end)
+    y = y + makeSlider(AimPage, y, "smoothness", 1, 40, Config.Smoothness, function(v) Config.Smoothness = v end)
+    y = y + makeSlider(AimPage, y, "prediction base", 0, 0.4, Config.Prediction, function(v) Config.Prediction = v end)
 
     local partRow = mk("Frame", {
         Size = UDim2.new(1, 0, 0, 40), Position = UDim2.new(0, 0, 0, y),
@@ -419,7 +488,7 @@ end
 do
     mk("TextLabel", {
         Size = UDim2.new(1, 0, 0, 24), Position = UDim2.new(0, 4, 0, 0),
-        BackgroundTransparency = 1, Text = "клик по нику — зафиксировать. повторный клик — снять.",
+        BackgroundTransparency = 1, Text = "клик — фиксировать. повторный — снять.",
         TextSize = 11, Font = Enum.Font.Gotham, TextColor3 = C.sub,
         TextXAlignment = Enum.TextXAlignment.Left,
     }, PlayersPage)
@@ -493,7 +562,7 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]  stealth", false, function(v) setFly(v) end)
+    y = y + makeToggle(MiscPage, y, "fly  [" .. Config.FlyKey.Name .. "]", false, function(v) setFly(v) end)
     y = y + makeSlider(MiscPage, y, "fly speed  (>40 = риск)", 10, 80, Config.FlySpeed, function(v) Config.FlySpeed = v end)
     y = y + makeToggle(MiscPage, y, "fast reload  [R]", false, function(v) Config.FastReload = v end)
     y = y + makeToggle(MiscPage, y, "fast stop", false, function(v) Config.FastStop = v end)
@@ -505,7 +574,7 @@ end
 -- ============================================================
 do
     local y = 0
-    y = y + makeToggle(SetPage, y, "hold to lock (off = toggle)", true, function(v) Config.LockHold = v end)
+    y = y + makeToggle(SetPage, y, "hold to lock", true, function(v) Config.LockHold = v end)
 
     local capturing = false
     local keyRow = mk("Frame", {
@@ -539,9 +608,7 @@ do
     end)
 
     UIS.InputBegan:Connect(function(i, gp)
-        if unloaded then return end
-        if not capturing then return end
-        if gp then return end
+        if unloaded or not capturing then return end
         if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
         if i.KeyCode == Enum.KeyCode.Escape then setCapturing(false); return end
         Config.LockKey = i.KeyCode
@@ -588,22 +655,52 @@ local HudBar = mk("Frame", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = C.
 corner(HudBar, 2)
 
 -- ============================================================
--- TARGETING
+-- STICKY TARGETING
 -- ============================================================
+local stickyTarget = nil
+local stickyLostAt = 0
+
+local function inFOV(plr)
+    local part = getPart(plr)
+    if not part then return false end
+    local sp, on = Camera:WorldToViewportPoint(part.Position)
+    if not on then return false end
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    return (Vector2.new(sp.X, sp.Y) - center).Magnitude <= Config.FOV
+end
+
 local function pickTarget()
+    -- manual override wins
     if Config.SelectedTarget and valid(Config.SelectedTarget) and teamOK(Config.SelectedTarget) then
         return Config.SelectedTarget
     end
     if not Config.AutoLock then return nil end
+
+    local now = tick()
+
+    -- sticky: keep current target if still valid + in FOV + visible, else start release timer
+    if stickyTarget and valid(stickyTarget) and teamOK(stickyTarget) then
+        if inFOV(stickyTarget) and visible(stickyTarget) then
+            stickyLostAt = 0
+            return stickyTarget
+        end
+        if stickyLostAt == 0 then stickyLostAt = now end
+        if now - stickyLostAt < Config.StickyRelease then
+            return stickyTarget
+        end
+        stickyTarget = nil
+        stickyLostAt = 0
+    end
+
+    -- pick best by screen distance
     local best, bestScore = nil, math.huge
     local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     for _, plr in ipairs(Players:GetPlayers()) do
         if valid(plr) and teamOK(plr) then
-            local ch = plr.Character
-            local part = ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("HumanoidRootPart")
+            local part = getPart(plr)
             if part then
-                local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-                if onScreen then
+                local sp, on = Camera:WorldToViewportPoint(part.Position)
+                if on then
                     local d2 = (Vector2.new(sp.X, sp.Y) - center).Magnitude
                     if d2 <= Config.FOV and d2 < bestScore and visible(plr) then
                         bestScore = d2; best = plr
@@ -611,6 +708,10 @@ local function pickTarget()
                 end
             end
         end
+    end
+    if best then
+        stickyTarget = best
+        stickyLostAt = 0
     end
     return best
 end
@@ -722,12 +823,11 @@ local function updateESP()
 end
 
 -- ============================================================
--- CLEANUP (panic)
+-- CLEANUP
 -- ============================================================
 function cleanup()
     if unloaded then return end
     unloaded = true
-    -- kill fly first, restore humanoid
     if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
     if flySaved then
         local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
@@ -739,40 +839,32 @@ function cleanup()
         end
         flySaved = nil
     end
-    -- remove drawings
     if fovCircle then pcall(function() fovCircle:Remove() end) end
     for plr, cache in next, ESPCache do
         for _, d in next, cache do pcall(function() d:Remove() end) end
         ESPCache[plr] = nil
     end
-    -- remove gui
     if Gui then pcall(function() Gui:Destroy() end) end
 end
 
 -- ============================================================
--- INPUT HANDLERS
+-- INPUT
 -- ============================================================
 local aiming = false
 
 UIS.InputBegan:Connect(function(i, gp)
     if unloaded then return end
-    if gp then return end
+    if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if UIS:GetFocusedTextBox() then return end
+
     if i.KeyCode == Config.PanicKey then cleanup(); return end
-    if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled end
+    if i.KeyCode == Config.MenuKey then Gui.Enabled = not Gui.Enabled; return end
     if i.KeyCode == Config.LockKey then
         if Config.LockHold then aiming = true else aiming = not aiming end
+        return
     end
-    if i.KeyCode == Config.FlyKey then setFly(not Config.FlyEnabled) end
-    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then
-        local char = LP.Character
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        local bp = LP:FindFirstChildOfClass("Backpack")
-        if tool and bp and char then
-            tool.Parent = bp
-            task.wait(0.02)
-            if not unloaded and tool then tool.Parent = char end
-        end
-    end
+    if i.KeyCode == Config.FlyKey then setFly(not Config.FlyEnabled); return end
+    if i.KeyCode == Enum.KeyCode.R and Config.FastReload then fastReload(); return end
 end)
 
 UIS.InputEnded:Connect(function(i)
@@ -780,34 +872,37 @@ UIS.InputEnded:Connect(function(i)
 end)
 
 -- ============================================================
--- AIM LOOP
+-- AIM LOOP  (smart tracking)
 -- ============================================================
 RunSvc.RenderStepped:Connect(function(dt)
     if unloaded then return end
     if not (aiming and Config.LockEnabled) then return end
+
     local target = pickTarget()
     if not target then return end
-    local ch = target.Character
-    if not ch then return end
-    local part = ch:FindFirstChild(Config.TargetPart) or ch:FindFirstChild("HumanoidRootPart")
+    local part = getPart(target)
     if not part then return end
 
-    local pos = part.Position
+    -- velocity-aware prediction, ping-scaled
+    local ping = getPing()
+    local dist = (Camera.CFrame.Position - part.Position).Magnitude
+    local distFactor = math.clamp(dist / 100, 0.6, 1.6)   -- long range = more lead
+    local lead = Config.Prediction + ping * 0.5
+    local aimPos = part.Position
     if part.AssemblyLinearVelocity then
-        pos = pos + part.AssemblyLinearVelocity * Config.Prediction
+        aimPos = aimPos + part.AssemblyLinearVelocity * lead * distFactor
     end
 
     local cf = Camera.CFrame
-    local dir = (pos - cf.Position).Unit
-    local angle = math.deg(math.acos(math.clamp(cf.LookVector:Dot(dir), -1, 1)))
-    local goal = CFrame.lookAt(cf.Position, pos)
+    local goal = CFrame.lookAt(cf.Position, aimPos)
+    local angle = math.deg(math.acos(math.clamp(cf.LookVector:Dot((aimPos - cf.Position).Unit), -1, 1)))
 
-    if angle <= Config.SnapZone then
-        Camera.CFrame = goal
-    else
-        local alpha = math.clamp(Config.Smoothness * dt, 0, 1)
-        Camera.CFrame = cf:Lerp(goal, alpha)
-    end
+    -- adaptive smoothing: tight when close to target, smooth when far off
+    local base = Config.Smoothness
+    local adaptive = math.clamp(base * (0.7 + angle / 30), base * 0.7, base * 2.5)
+    local alpha = math.clamp(adaptive * dt, 0, 1)
+
+    Camera.CFrame = cf:Lerp(goal, alpha)
 end)
 
 -- ============================================================
@@ -846,8 +941,8 @@ end)
 -- ============================================================
 task.spawn(function()
     while Gui.Parent and not unloaded do
-        if Config.TargetHUD and Config.SelectedTarget and valid(Config.SelectedTarget) then
-            local t = Config.SelectedTarget
+        local t = Config.SelectedTarget or stickyTarget
+        if Config.TargetHUD and t and valid(t) then
             local hum = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
             if hum then
                 HudFrame.Visible = true
@@ -862,4 +957,4 @@ task.spawn(function()
     end
 end)
 
-print("[Sh] v5 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  menu = " .. Config.MenuKey.Name .. "  ·  panic = " .. Config.PanicKey.Name)
+print("[Sh] v7 loaded. lock = " .. Config.LockKey.Name .. "  ·  fly = " .. Config.FlyKey.Name .. "  ·  panic = " .. Config.PanicKey.Name)
