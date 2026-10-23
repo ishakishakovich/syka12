@@ -1,7 +1,7 @@
 -- crumb | dahood all-in-one
 -- Executor: Synapse/Delta/Fluxus (sUNC high for hookmetamethod)
 -- Game: Da Hood (2788229376) and copies
--- Contains: Rayfield menu, player list w/ target select, aimlock, ESP, fast reload (tool property + animation)
+-- Contains: Rayfield menu, aimlock (nearest in view, camera-priority), ESP, fast reload (multiplier slider)
 
 -- ============================================================
 -- SERVICES
@@ -20,7 +20,6 @@ local Config = {
         enabled        = false,
         key            = Enum.KeyCode.E,
         prediction     = 0.165,
-        target         = nil,
     },
     esp = {
         enabled        = false,
@@ -33,6 +32,7 @@ local Config = {
     },
     fastReload = {
         enabled        = false,
+        multiplier     = 2.0,
     },
 }
 
@@ -44,16 +44,18 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Window = Rayfield:CreateWindow({
     Name = "crumb | dahood",
     LoadingTitle = "crumb loading",
-    LoadingSubtitle = "player list / lock / esp / reload",
+    LoadingSubtitle = "lock / esp / reload",
     Theme = "Default",
     ToggleUIKeybind = "K",
     ConfigurationSaving = { Enabled = false },
 })
 
 -- ============================================================
--- AIMLOCK
+-- AIMLOCK (nearest target, camera-priority)
 -- ============================================================
-local function isTargetValid(plr)
+local aimTarget = nil
+
+local function isPlayerValid(plr)
     if not plr or plr == LocalPlayer then return false end
     local char = plr.Character
     if not char then return false end
@@ -69,20 +71,58 @@ local function isTargetValid(plr)
     return true
 end
 
-local function getTargetPart()
-    local t = Config.aimlock.target
-    if not isTargetValid(t) then return nil end
-    return t.Character.HumanoidRootPart
+local function getNearestTarget()
+    local myChar = LocalPlayer.Character
+    if not myChar then return nil end
+    local myHrp = myChar:FindFirstChild("HumanoidRootPart")
+    if not myHrp then return nil end
+
+    local cam = Workspace.CurrentCamera
+    local best, bestScore = nil, math.huge
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if isPlayerValid(plr) then
+            local hrp = plr.Character.HumanoidRootPart
+            local head = plr.Character:FindFirstChild("Head") or hrp
+            local dist = (myHrp.Position - hrp.Position).Magnitude
+
+            if dist <= 350 then
+                local toTarget = (head.Position - cam.CFrame.Position).Unit
+                local lookDir = cam.CFrame.LookVector
+                local dot = toTarget:Dot(lookDir)
+                if dot > 0.35 then
+                    local score = dist * (2 - dot)
+                    if score < bestScore then
+                        bestScore = score
+                        best = {plr = plr, part = head}
+                    end
+                end
+            end
+        end
+    end
+    return best
 end
 
-RunService:BindToRenderStep("crumb_aimlock", 0, function()
+RunService:BindToRenderStep("crumb_aimlock", Enum.RenderPriority.Camera.Value + 1, function()
     if not Config.aimlock.enabled then return end
     if not UserInputService:IsKeyDown(Config.aimlock.key) then return end
-    local part = getTargetPart()
-    if not part then return end
-    local hit = part.CFrame + (part.Velocity * Config.aimlock.prediction)
-    Workspace.CurrentCamera.CFrame =
-        CFrame.lookAt(Workspace.CurrentCamera.CFrame.Position, hit.Position)
+
+    local target = getNearestTarget()
+    if not target then
+        aimTarget = nil
+        return
+    end
+    aimTarget = target
+
+    local part = target.part
+    if not part or not part.Parent then return end
+
+    local cam = Workspace.CurrentCamera
+    local camPos = cam.CFrame.Position
+    local vel = part.AssemblyLinearVelocity or part.Velocity or Vector3.zero
+    local hitPos = part.Position + (vel * Config.aimlock.prediction)
+
+    cam.CFrame = CFrame.lookAt(camPos, hitPos)
 end)
 
 -- ============================================================
@@ -181,42 +221,44 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ============================================================
--- FAST RELOAD (tool property + animation)
+-- FAST RELOAD (multiplier slider)
 -- ============================================================
 local fastReloadConnections = {}
 local reloadedTools = {}
-local animSpeed = 2
+local patchedAnimTracks = {}
 
-local function tryPatchTool(tool)
-    if not Config.fastReload.enabled then return end
+local function getMultiplier()
+    local m = Config.fastReload.multiplier
+    if type(m) ~= "number" or m < 1 then return 1 end
+    return m
+end
+
+local function applyMultiplierToTool(tool)
     if not tool:IsA("Tool") then return end
     if reloadedTools[tool] then return end
     reloadedTools[tool] = true
+    local mult = getMultiplier()
 
-    -- 1) Property-based: ищем свойства похожие на время перезарядки
+    -- свойства Tool, похожие на время перезарядки
     local props = {"ReloadTime", "Cooldown", "ReloadSpeed", "ReloadDuration", "Reload"}
     for _, propName in ipairs(props) do
         local ok, val = pcall(function() return tool[propName] end)
         if ok and type(val) == "number" and val > 0 then
-            pcall(function()
-                tool[propName] = val / 2
-            end)
+            pcall(function() tool[propName] = val / mult end)
         end
     end
 
-    -- 2) Child values with matching names
+    -- NumberValue / IntValue внутри Tool
     for _, child in ipairs(tool:GetChildren()) do
         if child:IsA("NumberValue") or child:IsA("IntValue") then
             local n = child.Name:lower()
             if n:find("reload") or n:find("cooldown") or n:find("duration") then
-                pcall(function()
-                    child.Value = child.Value / 2
-                end)
+                pcall(function() child.Value = child.Value / mult end)
             end
         end
     end
 
-    -- 3) Animation-based: ловим новые Animation внутри Tool
+    -- анимации перезарядки, которые появятся позже
     table.insert(fastReloadConnections, tool.ChildAdded:Connect(function(child)
         if not Config.fastReload.enabled then return end
         if not child:IsA("Animation") then return end
@@ -231,9 +273,17 @@ local function tryPatchTool(tool)
             local track = animator:LoadAnimation(child)
             track:Play()
             task.wait(0.05)
-            track:AdjustSpeed(animSpeed)
+            track:AdjustSpeed(getMultiplier())
+            patchedAnimTracks[track] = true
         end)
     end))
+end
+
+local function scanCharacterForTools(char)
+    if not char then return end
+    for _, c in ipairs(char:GetChildren()) do
+        if c:IsA("Tool") then applyMultiplierToTool(c) end
+    end
 end
 
 local function enableFastReload()
@@ -241,12 +291,9 @@ local function enableFastReload()
     local function hookChar(char)
         task.wait(0.3)
         if not Config.fastReload.enabled then return end
-        -- ловим уже экипированные
-        for _, c in ipairs(char:GetChildren()) do
-            if c:IsA("Tool") then tryPatchTool(c) end
-        end
+        scanCharacterForTools(char)
         table.insert(fastReloadConnections, char.ChildAdded:Connect(function(child)
-            tryPatchTool(child)
+            if child:IsA("Tool") then applyMultiplierToTool(child) end
         end))
     end
     if LocalPlayer.Character then hookChar(LocalPlayer.Character) end
@@ -259,46 +306,15 @@ local function disableFastReload()
     end
     fastReloadConnections = {}
     reloadedTools = {}
+    patchedAnimTracks = {}
 end
 
--- ============================================================
--- UI: PLAYERS TAB
--- ============================================================
-local PlayerTab = Window:CreateTab("Players", nil)
-local playerButtons = {}
-
-local function refreshPlayerList()
-    for _, btn in pairs(playerButtons) do
-        pcall(function() btn:Destroy() end)
-    end
-    playerButtons = {}
-
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then
-            local display = plr.DisplayName .. " (@" .. plr.Name .. ")"
-            local btn = PlayerTab:CreateButton({
-                Name = display,
-                Callback = function()
-                    Config.aimlock.target = plr
-                    Rayfield:Notify({
-                        Title   = "target set",
-                        Content = display,
-                        Duration = 2,
-                    })
-                end,
-            })
-            table.insert(playerButtons, btn)
-        end
-    end
+-- при изменении ползунка пересобираем хуки, чтобы новые значения применились к новым инструментам
+local function rebuildFastReload()
+    if not Config.fastReload.enabled then return end
+    disableFastReload()
+    enableFastReload()
 end
-
-refreshPlayerList()
-Players.PlayerAdded:Connect(refreshPlayerList)
-Players.PlayerRemoving:Connect(function(plr)
-    if Config.aimlock.target == plr then Config.aimlock.target = nil end
-    cleanupESP(plr)
-    refreshPlayerList()
-end)
 
 -- ============================================================
 -- UI: ESP TAB
@@ -369,7 +385,7 @@ MainTab:CreateSlider({
 MainTab:CreateSection("reload")
 
 MainTab:CreateToggle({
-    Name         = "Fast Reload (x2)",
+    Name         = "Fast Reload",
     CurrentValue = false,
     Flag         = "fastreload_toggle",
     Callback     = function(bool)
@@ -378,12 +394,26 @@ MainTab:CreateToggle({
             enableFastReload()
             Rayfield:Notify({
                 Title   = "fast reload",
-                Content = "x2 armed — equip a weapon",
+                Content = "x" .. tostring(getMultiplier()) .. " armed — equip a weapon",
                 Duration = 3,
             })
         else
             disableFastReload()
         end
+    end,
+})
+
+MainTab:CreateSlider({
+    Name         = "Reload Multiplier",
+    Range        = {1, 10},
+    Increment    = 0.5,
+    Suffix       = "x",
+    CurrentValue = 2,
+    Flag         = "reload_mult",
+    Callback     = function(value)
+        Config.fastReload.multiplier = value
+        -- пересобираем хуки, чтобы новое значение применилось к уже экипированному оружию
+        rebuildFastReload()
     end,
 })
 
